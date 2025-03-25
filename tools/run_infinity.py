@@ -311,7 +311,7 @@ def load_transformer(vae, args):
         print(f'load checkpoint from {slim_model_path}')
     elif args.checkpoint_type == 'torch_shard':
         slim_model_path = model_path
-
+    
     if args.model_type == 'infinity_2b':
         kwargs_model = dict(depth=32, embed_dim=2048, num_heads=2048//128, drop_path_rate=0.1, mlp_ratio=4, block_chunks=8) # 2b model
     elif args.model_type == 'infinity_8b':

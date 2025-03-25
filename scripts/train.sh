@@ -3,7 +3,7 @@
 set -x
 
 # set dist args
-# SINGLE=1
+SINGLE=1
 nproc_per_node=${ARNOLD_WORKER_GPU}
 
 if [ ! -z "$SINGLE" ] && [ "$SINGLE" != "0" ]; then
@@ -32,10 +32,10 @@ echo "[master_addr: ${master_addr}]"
 echo "[master_port: ${master_port}]"
 
 # set up envs
-export OMP_NUM_THREADS=8
+export OMP_NUM_THREADS=1
 export NCCL_IB_DISABLE=0
 export NCCL_IB_GID_INDEX=3
-export NCCL_SOCKET_IFNAME=eth0
+# export NCCL_SOCKET_IFNAME=eth0
 
 
 BED=checkpoints
@@ -50,7 +50,7 @@ export CUDA_TIMER_STREAM_KAFKA_CLUSTER=bmq_data_va
 export CUDA_TIMER_STREAM_KAFKA_TOPIC=megatron_cuda_timer_tracing_original_v2
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
-wandb offline
+# wandb offline
 exp_name=debug
 bed_path=checkpoints/${exp_name}/
 data_path='data/infinity_toy_data/splits'
@@ -67,7 +67,7 @@ torchrun \
 --master_addr=${master_addr} \
 --master_port=${master_port} \
 train.py \
---ep=100 \
+--ep=4 \
 --opt=adamw \
 --cum=3 \
 --sche=lin0 \
@@ -88,8 +88,8 @@ train.py \
 --exp_name=${exp_name} \
 --tblr=6e-3 \
 --pn 0.06M \
---model=2bc8 \
---lbs=4 \
+--model=layer12c4 \
+--lbs=1 \
 --workers=8 \
 --short_cap_prob 0.5 \
 --online_t5=1 \
@@ -97,8 +97,8 @@ train.py \
 --iterable_data_buffersize 30000 \
 --Ct5=2048 \
 --t5_path=weights/flan-t5-xl \
---vae_type 32 \
---vae_ckpt=weights/infinity_vae_d32_rdn_short.pth  \
+--vae_type 16 \
+--vae_ckpt=weights/infinity_vae_d16.pth  \
 --wp 0.00000001 \
 --wpe=1 \
 --dynamic_resolution_across_gpus 1 \
@@ -117,6 +117,9 @@ train.py \
 --prefetch_factor=16 \
 --noise_apply_strength 0.3 \
 --noise_apply_layers 13 \
---apply_spatial_patchify 0 \
---use_flex_attn=True \
---pad=128
+--apply_spatial_patchify 1 \
+--use_flex_attn=False \
+--pad=128 \
+--rush_resume=weights/infinity_125M_256x256.pth \
+--project_name 125_toy \
+--exp_name 125_toy_layer12c4_d16_100ep

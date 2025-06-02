@@ -74,7 +74,7 @@ def build_everything_from_args(args: arg_util.Args, saver):
         return None
     if trainer_state is not None and len(trainer_state):
         trainer.load_state_dict(trainer_state, strict=False, skip_vae=True) # don't load vae again
-    
+
     start_it = start_it % iters_train
     print(f"{start_it=}, {iters_train=}")
     
@@ -421,7 +421,7 @@ def main_train(args: arg_util.Args):
     print(f'  [*] [PT finished]  Total Time: {total_time},   Lm: {min_L_mean:.3f} ({L_mean}),   Lt: {min_L_tail:.3f} ({L_tail})')
     print('\n\n')
     
-    del stats, iters_train, ld_train, visualizer
+    del stats, iters_train, ld_train
     time.sleep(3), gc.collect(), torch.cuda.empty_cache(), time.sleep(3)
     return
 
@@ -552,8 +552,8 @@ def main():     # # 'pt_le_ft' in train_vae.py is the same as 'pt_le_ft' in trai
     if isinstance(sys.stdout, dist.BackupStreamToFile) and isinstance(sys.stderr, dist.BackupStreamToFile):
         sys.stdout.close(), sys.stderr.close()
     if dist.is_local_master(): misc.os_system(f'rm -rf {wait1}')
-    if args.vis and dist.is_visualizer():
-        misc.os_system(f'hdfs dfs -get {args.tb_log_dir_online}/* {args.tb_log_dir}/ >/dev/null 2>&1')  # 'cp -r {args.local_out_path}/* {args.bed}/' is done by lockable.py or launch.py
+    # if args.vis and dist.is_visualizer():
+    #     misc.os_system(f'hdfs dfs -get {args.tb_log_dir_online}/* {args.tb_log_dir}/ >/dev/null 2>&1')  # 'cp -r {args.local_out_path}/* {args.bed}/' is done by lockable.py or launch.py
     dist.barrier()
     time.sleep(120)
 

@@ -163,7 +163,7 @@ class InfinityTrainer(object):
         h_div_w_templates = np.array(list(dynamic_resolution_h_w.keys()))
         h_div_w_template = h_div_w_templates[np.argmin(np.abs(h_div_w-h_div_w_templates))]
         scale_schedule = dynamic_resolution_h_w[h_div_w_template][args.pn]['scales']
-        scale_schedule = [ (min(t, T//4+1), h, w) for (t,h, w) in scale_schedule]
+        scale_schedule = [(min(t, T//4+1), h, w) for (t,h, w) in scale_schedule]
         
         # [forward]
         with self.gpt_opt.amp_ctx:
@@ -204,7 +204,7 @@ class InfinityTrainer(object):
 
             if self.reweight_loss_by_scale:
                 lw = []
-                last_scale_area = np.sqrt(scale_schedule[-1].prod())
+                last_scale_area = np.sqrt(np.array(scale_schedule)[-1].prod())
                 for (pt, ph, pw) in scale_schedule[:training_scales]:
                     this_scale_area = np.sqrt(pt * ph * pw)
                     lw.extend([last_scale_area / this_scale_area for _ in range(pt * ph * pw)])

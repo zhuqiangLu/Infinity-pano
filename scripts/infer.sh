@@ -71,7 +71,7 @@ echo "$NODES,$NUM_GPUS,$NODE_RANK,$MASTER_ADDR,$MASTER_PORT,$DHOSTFILE" >> $OUTP
 export LD_PRELOAD=/home/bingxing2/ailab/scxlab0109/.conda/envs/dna_ft/lib/python3.8/site-packages/sklearn/__check_build/../../scikit_learn.libs/libgomp-d22c30c5.so.1.0.0
 free -h
 export LD_PRELOAD=/home/bingxing2/apps/compilers/gcc/12.2.0/lib64/libstdc++.so
-export HF_TOKEN=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
+export HF_TOKEN={}
 
 python -c "import triton; print(triton.__version__)" 
 

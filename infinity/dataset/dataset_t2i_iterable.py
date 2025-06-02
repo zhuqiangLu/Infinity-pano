@@ -275,7 +275,6 @@ class T2IIterableDataset(IterableDataset):
             if self.pano_aug:
                 images = torch.flip(images,  dims=[-1])
                 images = torch.roll(images, shifts=random.randint(0, images.shape[-1]), dims=-1)
-                raise
 
             
             yield (images, captions)

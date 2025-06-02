@@ -143,6 +143,7 @@ def build_t2i_dataset(
             dynamic_resolution_across_gpus=args.dynamic_resolution_across_gpus,
             enable_dynamic_length_prompt=args.enable_dynamic_length_prompt,
             seed=args.seed if args.seed is not None else int(time.time()),
+            pano_aug=args.pano_aug if args.pano_aug is not None else False,
         )
     else:
         raise ValueError(f'args.use_streaming_dataset={args.use_streaming_dataset} unsupported')

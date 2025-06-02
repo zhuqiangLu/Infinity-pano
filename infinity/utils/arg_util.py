@@ -157,6 +157,7 @@ class Args(Tap):
     apply_spatial_patchify: int = 0     # apply apply_spatial_patchify or not
     debug_bsc: int = 0                  # save figs and set breakpoint for debug bsc and check input
     task_type: str = 't2i'              # take type to t2i or t2v
+    pano_aug: bool = False              # apply pano augmentation
 
 
     ############################  Attention! The following arguments and configurations are set automatically, you can skip reading the following part ###############################

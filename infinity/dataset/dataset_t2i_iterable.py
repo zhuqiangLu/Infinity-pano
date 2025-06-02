@@ -98,6 +98,7 @@ class T2IIterableDataset(IterableDataset):
         dataloader_workers: int = 2,
         dynamic_resolution_across_gpus: bool = True,
         enable_dynamic_length_prompt: bool = True,
+        pano_aug: bool = False,
         **kwargs,
     ):
         self.meta_folder = meta_folder
@@ -126,6 +127,7 @@ class T2IIterableDataset(IterableDataset):
         self.epoch_worker_generator = None
         self.epoch_global_worker_generator = None
         self.set_epoch(0)
+        self.pano_aug = pano_aug
         print(f'num_replicas: {num_replicas}, rank: {rank}, dataloader_workers: {dataloader_workers}, seed:{seed}, samples_div_gpus_workers_batchsize_2batches: {self.samples_div_gpus_workers_batchsize_2batches}')
 
     def set_h_div_w_template2generator(self,):
@@ -266,8 +268,16 @@ class T2IIterableDataset(IterableDataset):
                     del data_item
                 except Exception as e:
                     print(e)
+                break
             captions = [item[0] for item in batch_data]
-            images = torch.stack([item[1] for item in batch_data])
+            images = torch.stack([item[1] for item in batch_data])  
+            
+            if self.pano_aug:
+                images = torch.flip(images,  dims=[-1])
+                images = torch.roll(images, shifts=random.randint(0, images.shape[-1]), dims=-1)
+                raise
+
+            
             yield (images, captions)
             del batch_data
             del images
@@ -342,6 +352,7 @@ class T2IIterableDataset(IterableDataset):
                     img = img.convert('RGB')
                     tgt_h, tgt_w = dynamic_resolution_h_w[h_div_w_template][self.pn]['pixel']
                     img_B3HW = transform(img, tgt_h, tgt_w)
+                    
             if not self.online_t5:
                 short_t5_path, long_t5_path = self.get_t5_path(img_path)
                 if self.epoch_global_worker_generator.random() <= self.short_prob:
@@ -366,11 +377,11 @@ class T2IIterableDataset(IterableDataset):
 if __name__ == '__main__':
     # torchrun --nnodes=1 --nproc-per-node=2 --master_addr=$METIS_WORKER_0_HOST --master_port=$METIS_WORKER_0_PORT dataset/dataset_t2i_iterable.py
     tdist.init_process_group(backend='nccl')
-    batch_size = 2
-    dataloader_workers = 12
+    batch_size = 1
+    dataloader_workers = 1
     dataset = T2IIterableDataset(
         args=None, 
-        meta_folder='data/train_splits/xxx_pretrain/jsonl_files_filter_duplicate_captions',
+        meta_folder='data/mp3d/splits',
         data_load_reso=None, 
         max_caption_len=512, 
         short_prob=1.0, 
@@ -378,9 +389,9 @@ if __name__ == '__main__':
         buffersize=100000,
         seed=0, 
         online_t5=True,
-        pn='0.06M',
+        pn='1M',
         batch_size=batch_size,
-        num_replicas=8, # tdist.get_world_size(),
+        num_replicas=tdist.get_world_size(),
         rank=tdist.get_rank(), # 0
         dataloader_workers=dataloader_workers,
     )

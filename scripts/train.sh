@@ -90,7 +90,7 @@ train.py \
 --pn 0.06M \
 --model=2bc8 \
 --lbs=4 \
---workers=8 \
+--workers=2 \
 --short_cap_prob 0.5 \
 --online_t5=1 \
 --use_streaming_dataset 1 \
@@ -99,6 +99,7 @@ train.py \
 --t5_path=weights/flan-t5-xl \
 --vae_type 32 \
 --vae_ckpt=weights/infinity_vae_d32_rdn_short.pth  \
+--rush_resume='/path_to/huggingface_models/FoundationVision-Infinity/infinity_2b_reg.pth' \
 --wp 0.00000001 \
 --wpe=1 \
 --dynamic_resolution_across_gpus 1 \
@@ -111,12 +112,12 @@ train.py \
 --always_training_scales 100 \
 --use_bit_label 1 \
 --zero=2 \
---save_model_iters_freq 100 \
+--save_model_iters_freq 500 \
 --log_freq=50 \
 --checkpoint_type='torch' \
 --prefetch_factor=16 \
 --noise_apply_strength 0.3 \
 --noise_apply_layers 13 \
 --apply_spatial_patchify 0 \
---use_flex_attn=True \
+--use_flex_attn=False \
 --pad=128

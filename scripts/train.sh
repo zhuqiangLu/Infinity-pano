@@ -3,7 +3,7 @@
 set -x
 
 # set dist args
-# SINGLE=1
+SINGLE=1
 nproc_per_node=${ARNOLD_WORKER_GPU}
 
 if [ ! -z "$SINGLE" ] && [ "$SINGLE" != "0" ]; then
@@ -32,10 +32,10 @@ echo "[master_addr: ${master_addr}]"
 echo "[master_port: ${master_port}]"
 
 # set up envs
-export OMP_NUM_THREADS=8
+export OMP_NUM_THREADS=1
 export NCCL_IB_DISABLE=0
 export NCCL_IB_GID_INDEX=3
-export NCCL_SOCKET_IFNAME=eth0
+# export NCCL_SOCKET_IFNAME=eth0
 
 
 BED=checkpoints
@@ -50,7 +50,7 @@ export CUDA_TIMER_STREAM_KAFKA_CLUSTER=bmq_data_va
 export CUDA_TIMER_STREAM_KAFKA_TOPIC=megatron_cuda_timer_tracing_original_v2
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
-wandb offline
+# wandb offline
 exp_name=debug
 bed_path=checkpoints/${exp_name}/
 data_path='data/infinity_toy_data/splits'
@@ -67,7 +67,7 @@ torchrun \
 --master_addr=${master_addr} \
 --master_port=${master_port} \
 train.py \
---ep=100 \
+--ep=4 \
 --opt=adamw \
 --cum=3 \
 --sche=lin0 \

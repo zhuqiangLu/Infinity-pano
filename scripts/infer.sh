@@ -92,7 +92,6 @@ rope2d_each_sa_layer=1
 text_encoder_ckpt=weights/google-flan-t5-xl
 text_channels=2048
 apply_spatial_patchify=0
-
 # run inference
 python3 run_infinity.py \
 --cfg ${cfg} \

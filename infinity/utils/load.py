@@ -83,6 +83,7 @@ def build_vae_gpt(args: arg_util.Args, vae_st: dict, skip_gpt: bool, force_flash
     
     from infinity.models import Infinity
     from timm.models import create_model
+    # print(gpt_kw)
     gpt_wo_ddp: Infinity = create_model(model_str, **gpt_kw)
     if args.use_fsdp_model_ema:
         gpt_wo_ddp_ema = get_ema_model(gpt_wo_ddp)

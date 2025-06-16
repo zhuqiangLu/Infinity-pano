@@ -528,6 +528,7 @@ class Infinity(nn.Module):
         inference_mode=False,
         save_img_path=None,
         sampling_per_bits=1,
+        enable_cubemap=False,
     ):   # returns List[idx_Bl]
         if g_seed is None: rng = None
         else: self.rng.manual_seed(g_seed); rng = self.rng
@@ -566,6 +567,7 @@ class Infinity(nn.Module):
         ca_kv = kv_compact, cu_seqlens_k, max_seqlen_k
         last_stage = sos.unsqueeze(1).expand(bs, 1, -1) + self.pos_start.expand(bs, 1, -1)
 
+        
         with torch.amp.autocast('cuda', enabled=False):
             cond_BD_or_gss = self.shared_ada_lin(cond_BD.float()).float().contiguous()
         accu_BChw, cur_L, ret = None, 0, []  # current length, list of reconstructed images
@@ -582,6 +584,7 @@ class Infinity(nn.Module):
         abs_cfg_insertion_layers = []
         add_cfg_on_logits, add_cfg_on_probs = False, False
         leng = len(self.unregistered_blocks)
+    
         for item in cfg_insertion_layer:
             if item == 0: # add cfg on logits
                 add_cfg_on_logits = True
@@ -601,6 +604,13 @@ class Infinity(nn.Module):
                 break
             cur_L += np.array(pn).prod()
 
+
+
+            # cubemap trick goes here, expand to 6 faces 
+            if enable_cubemap and si == 0: 
+                last_stage = last_stage.unsqueeze(1).expand(-1, 6, -1, -1)
+                last_stage = rearrange(last_stage, 'b n l c -> (b n) l c')
+
             need_to_pad = 0
             attn_fn = None
             if self.use_flex_attn:
@@ -611,21 +621,34 @@ class Infinity(nn.Module):
 
             # assert self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].sum() == 0, f'AR with {(self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L] != 0).sum()} / {self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].numel()} mask item'
             layer_idx = 0
+
+            
+                
             for block_idx, b in enumerate(self.block_chunks):
                 # last_stage shape: [4, 1, 2048], cond_BD_or_gss.shape: [4, 1, 6, 2048], ca_kv[0].shape: [64, 2048], ca_kv[1].shape [5], ca_kv[2]: int
+                
+                
                 if self.add_lvl_embeding_only_first_block and block_idx == 0:
                     last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
                 if not self.add_lvl_embeding_only_first_block: 
                     last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
                 
+
+
+                
+                if enable_cubemap and block_idx == 0: 
+                    last_stage = rearrange(last_stage, '(b n) l c -> b (n l) c', n=6)
+                print("pre input shape", last_stage.shape)
                 for m in b.module:
                     last_stage = m(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=None, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=self.rope2d_freqs_grid, scale_ind=si)
+                    
                     if (cfg != 1) and (layer_idx in abs_cfg_insertion_layers):
                         # print(f'add cfg={cfg} on {layer_idx}-th layer output')
                         last_stage = cfg * last_stage[:B] + (1-cfg) * last_stage[B:]
                         last_stage = torch.cat((last_stage, last_stage), 0)
                     layer_idx += 1
-            
+                    
+
             if (cfg != 1) and add_cfg_on_logits:
                 # print(f'add cfg on add_cfg_on_logits')
                 logits_BlV = self.get_logits(last_stage, cond_BD).mul(1/tau_list[si])
@@ -633,25 +656,37 @@ class Infinity(nn.Module):
             else:
                 logits_BlV = self.get_logits(last_stage[:B], cond_BD[:B]).mul(1/tau_list[si])
             
+            if enable_cubemap:
+                logits_BlV = rearrange(logits_BlV, 'b (n l) c -> (b n) l c', n=6)
+            print("logits_BlV shape", logits_BlV.shape)
+            
             if self.use_bit_label:
                 tmp_bs, tmp_seq_len = logits_BlV.shape[:2]
                 logits_BlV = logits_BlV.reshape(tmp_bs, -1, 2)
                 idx_Bld = sample_with_top_k_top_p_also_inplace_modifying_logits_(logits_BlV, rng=rng, top_k=top_k or self.top_k, top_p=top_p or self.top_p, num_samples=1)[:, :, 0]
                 idx_Bld = idx_Bld.reshape(tmp_bs, tmp_seq_len, -1)
+                
             else:
                 idx_Bl = sample_with_top_k_top_p_also_inplace_modifying_logits_(logits_BlV, rng=rng, top_k=top_k or self.top_k, top_p=top_p or self.top_p, num_samples=1)[:, :, 0]
+            
             if vae_type != 0:
                 assert returns_vemb
                 if si < gt_leak:
                     idx_Bld = gt_ls_Bl[si]
                 else:
+                    
                     assert pn[0] == 1
-                    idx_Bld = idx_Bld.reshape(B, pn[1], pn[2], -1) # shape: [B, h, w, d] or [B, h, w, 4d]
+                    
+                    if enable_cubemap:
+                        idx_Bld = idx_Bld.reshape(B*6, pn[1], pn[2], -1) # shape: [B, h, w, d] or [B, h, w, 4d]
+                    else:
+                        idx_Bld = idx_Bld.reshape(B, pn[1], pn[2], -1) # shape: [B, h, w, d] or [B, h, w, 4d]
                     if self.apply_spatial_patchify: # unpatchify operation
                         idx_Bld = idx_Bld.permute(0,3,1,2) # [B, 4d, h, w]
                         idx_Bld = torch.nn.functional.pixel_shuffle(idx_Bld, 2) # [B, d, 2h, 2w]
                         idx_Bld = idx_Bld.permute(0,2,3,1) # [B, 2h, 2w, d]
                     idx_Bld = idx_Bld.unsqueeze(1) # [B, 1, h, w, d] or [B, 1, 2h, 2w, d]
+                    
 
                 idx_Bld_list.append(idx_Bld)
                 codes = vae.quantizer.lfq.indices_to_codes(idx_Bld, label_type='bit_label') # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
@@ -678,6 +713,7 @@ class Infinity(nn.Module):
                     accu_BChw, last_stage = self.quant_only_used_in_inference[0].one_step_fuse(si, num_stages_minus_1+1, accu_BChw, h_BChw, scale_schedule)
             
             if si != num_stages_minus_1:
+                
                 last_stage = self.word_embed(self.norm0_ve(last_stage))
                 last_stage = last_stage.repeat(bs//B, 1, 1)
 

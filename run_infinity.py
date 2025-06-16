@@ -25,7 +25,7 @@ from infinity.models.basic import *
 import PIL.Image as PImage
 from torchvision.transforms.functional import to_tensor
 from infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
-
+import equilib 
 
 def extract_key_val(text):
     pattern = r'<(.+?):(.+?)>'
@@ -97,6 +97,7 @@ def gen_one_img(
     g_seed=None,
     sampling_per_bits=1,
     enable_positive_prompt=0,
+    enable_cubemap=False,
 ):
     sstt = time.time()
     if not isinstance(cfg_list, list):
@@ -109,6 +110,7 @@ def gen_one_img(
     else:
         negative_label_B_or_BLT = None
     print(f'cfg: {cfg_list}, tau: {tau_list}')
+    print(f'enable_cubemap: {enable_cubemap}')
     with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16, cache_enabled=True):
         stt = time.time()
         _, _, img_list = infinity_test.autoregressive_infer_cfg(
@@ -123,9 +125,13 @@ def gen_one_img(
             ret_img=True, trunk_scale=1000,
             gt_leak=gt_leak, gt_ls_Bl=gt_ls_Bl, inference_mode=True,
             sampling_per_bits=sampling_per_bits,
+            enable_cubemap=enable_cubemap,
         )
     print(f"cost: {time.time() - sstt}, infinity cost={time.time() - stt}")
-    img = img_list[0]
+    if enable_cubemap:
+        img = img_list
+    else:
+        img = img_list[0]
     return img
 
 def get_prompt_id(prompt):
@@ -374,6 +380,7 @@ def add_common_arguments(parser):
     parser.add_argument('--checkpoint_type', type=str, default='torch')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--bf16', type=int, default=1, choices=[0,1])
+    parser.add_argument('--enable_cubemap', action='store_true')
     
 
 
@@ -398,7 +405,7 @@ if __name__ == '__main__':
     
     scale_schedule = dynamic_resolution_h_w[args.h_div_w_template][args.pn]['scales']
     scale_schedule = [ (1, h, w) for (_, h, w) in scale_schedule]
-
+    
     with autocast(dtype=torch.bfloat16):
         with torch.no_grad():
             generated_image = gen_one_img(
@@ -417,7 +424,15 @@ if __name__ == '__main__':
                 vae_type=args.vae_type,
                 sampling_per_bits=args.sampling_per_bits,
                 enable_positive_prompt=args.enable_positive_prompt,
+                enable_cubemap=args.enable_cubemap,
             )
-    os.makedirs(osp.dirname(osp.abspath(args.save_file)), exist_ok=True)
-    cv2.imwrite(args.save_file, generated_image.cpu().numpy())
-    print(f'Save to {osp.abspath(args.save_file)}')
+    if args.enable_cubemap:
+        os.makedirs(args.save_file, exist_ok=True)
+        for i, img in enumerate(generated_image):
+            cv2.imwrite(osp.join(args.save_file, f'{i}.jpg'), img.cpu().numpy())
+        # generated_image = equilib.cubemap_to_equirect(generated_image)
+        # cv2.imwrite(osp.join(args.save_file, 'pano.jpg'), generated_image.cpu().numpy())
+    else:
+        os.makedirs(osp.dirname(osp.abspath(args.save_file)), exist_ok=True)
+        cv2.imwrite(args.save_file, generated_image.cpu().numpy())
+        print(f'Save to {osp.abspath(args.save_file)}')

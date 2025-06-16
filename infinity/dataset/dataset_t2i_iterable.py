@@ -22,6 +22,9 @@ from torch.utils.data import Dataset
 from torchvision.transforms.functional import to_tensor
 from torch.utils.data import IterableDataset, DataLoader
 import torch.distributed as tdist
+import torchvision
+from einops import rearrange
+from equilib import equi2cube
 
 from infinity.utils.dynamic_resolution import dynamic_resolution_h_w, get_h_div_w_template2indices, h_div_w_templates
 from infinity.utils.large_file_util import get_part_jsonls, split_large_txt_files
@@ -99,6 +102,8 @@ class T2IIterableDataset(IterableDataset):
         dynamic_resolution_across_gpus: bool = True,
         enable_dynamic_length_prompt: bool = True,
         pano_aug: bool = False,
+        cubemap_size: int = 512,
+        enable_cubemap: bool = False,
         **kwargs,
     ):
         self.meta_folder = meta_folder
@@ -128,6 +133,8 @@ class T2IIterableDataset(IterableDataset):
         self.epoch_global_worker_generator = None
         self.set_epoch(0)
         self.pano_aug = pano_aug
+        self.cubemap_size = cubemap_size
+        self.enable_cubemap = enable_cubemap
         print(f'num_replicas: {num_replicas}, rank: {rank}, dataloader_workers: {dataloader_workers}, seed:{seed}, samples_div_gpus_workers_batchsize_2batches: {self.samples_div_gpus_workers_batchsize_2batches}')
 
     def set_h_div_w_template2generator(self,):
@@ -272,10 +279,33 @@ class T2IIterableDataset(IterableDataset):
             captions = [item[0] for item in batch_data]
             images = torch.stack([item[1] for item in batch_data])  
             
-            if self.pano_aug:
-                images = torch.flip(images,  dims=[-1])
-                images = torch.roll(images, shifts=random.randint(0, images.shape[-1]), dims=-1)
+            
 
+            if self.enable_cubemap:
+                if self.pano_aug:
+                    images = torch.flip(images,  dims=[-1])
+                    images = torch.roll(images, shifts=random.randint(0, images.shape[-1]), dims=-1)
+                rot = dict(
+                    yaw=0,
+                    pitch=0,
+                    roll=0,
+                )
+                cubemaps = list()
+                start = time.time()
+                for idx, image in enumerate(images):
+                    ret = equi2cube(image,rots=rot, w_face=self.cubemap_size, mode='bilinear', cube_format='dict')
+                    # saved as F,R,B,L,U,D
+                    cubemap = torch.stack([ret[key] for key in ['F', 'R', 'B', 'L', 'U', 'D']])
+                    cubemaps.append(cubemap)
+                images = torch.stack(cubemaps, dim=0)    
+
+
+                images = rearrange(images, 'b n c h w -> (b n) c h w')
+            
+                
+                    
+                
+                
             
             yield (images, captions)
             del batch_data
@@ -376,7 +406,7 @@ class T2IIterableDataset(IterableDataset):
 if __name__ == '__main__':
     # torchrun --nnodes=1 --nproc-per-node=2 --master_addr=$METIS_WORKER_0_HOST --master_port=$METIS_WORKER_0_PORT dataset/dataset_t2i_iterable.py
     tdist.init_process_group(backend='nccl')
-    batch_size = 1
+    batch_size = 4
     dataloader_workers = 1
     dataset = T2IIterableDataset(
         args=None, 

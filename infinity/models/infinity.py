@@ -16,6 +16,7 @@ from timm.models import register_model
 from torch.utils.checkpoint import checkpoint
 from PIL import Image
 import numpy as np
+from einops import rearrange
 
 import infinity.utils.dist as dist
 from infinity.utils.dist import for_visualize
@@ -102,6 +103,7 @@ class Infinity(nn.Module):
         always_training_scales=20,
         apply_spatial_patchify = 0,
         inference_mode=False,
+        enable_cubemap=False,
     ):
         # set hyperparameters
         self.C = embed_dim
@@ -127,6 +129,7 @@ class Infinity(nn.Module):
         self.train_h_div_w_list = train_h_div_w_list if train_h_div_w_list else h_div_w_templates
         self.video_frames = video_frames
         self.always_training_scales = always_training_scales
+        self.enable_cubemap = enable_cubemap
 
         assert add_lvl_embeding_only_first_block in [0,1]
         self.add_lvl_embeding_only_first_block = add_lvl_embeding_only_first_block
@@ -352,15 +355,29 @@ class Infinity(nn.Module):
     def add_lvl_embeding_for_x_BLC(self, x_BLC, scale_schedule, need_to_pad=0):
         ptr = 0
         x_BLC_list = []
+        if self.enable_cubemap:
+            x_BLC_head = x_BLC[:, :-need_to_pad]
+            x_BLC_tail = x_BLC[:, -need_to_pad:]
+
+            x_BLC = rearrange(x_BLC_head, 'b (n l) c -> (n b) l c', n=6)
+           
+            
+
         for scale_ind, patch_t_h_w in enumerate(scale_schedule):
             scale_seq_len = np.array(patch_t_h_w).prod()
             x_BLC_this_scale = x_BLC[:,ptr:ptr+scale_seq_len] # shape: [bs, patch_h*patch_w, c]
+
             ptr += scale_seq_len
             x_BLC_this_scale = self.add_lvl_embeding(x_BLC_this_scale, scale_ind, scale_schedule)
             x_BLC_list.append(x_BLC_this_scale)
-        assert x_BLC.shape[1] == (ptr + need_to_pad), f'{x_BLC.shape[1]} != {ptr} + {need_to_pad}'
+        # assert x_BLC.shape[1] == (ptr + need_to_pad), f'{x_BLC.shape[1]} != {ptr} + {need_to_pad}'
         x_BLC_list.append(x_BLC[:,ptr:])
         x_BLC = torch.cat(x_BLC_list, dim=1)
+        if self.enable_cubemap:
+            x_BLC = rearrange(x_BLC, '(n b) l c -> b (n l) c', n=6)
+            x_BLC = torch.cat((x_BLC, x_BLC_tail), dim=1)
+            
+            
         return x_BLC
 
     def forward(self, label_B_or_BLT: Union[torch.LongTensor, Tuple[torch.FloatTensor, torch.IntTensor, int]], x_BLC_wo_prefix: torch.Tensor, scale_schedule: List[Tuple[int]],
@@ -376,6 +393,10 @@ class Infinity(nn.Module):
         
         x_BLC_wo_prefix = x_BLC_wo_prefix.float()       # input should be float32
         B = x_BLC_wo_prefix.shape[0]
+        N = 6 # the number of faces
+        if self.enable_cubemap:
+            B = B // N 
+
 
         # [1. get input sequence x_BLC]
         with torch.amp.autocast('cuda', enabled=False):
@@ -396,11 +417,31 @@ class Infinity(nn.Module):
             cond_BD_or_gss = self.shared_ada_lin(cond_BD).contiguous()  # gss: gamma, scale, shift; cond_BD_or_gss should be float32
             
             sos = sos.unsqueeze(1).expand(B, 1, -1) + self.pos_start.expand(B, 1, -1)
-            x_BLC = torch.cat((sos, self.word_embed(self.norm0_ve(x_BLC_wo_prefix))), dim=1)
+            x_BLC_body = self.word_embed(self.norm0_ve(x_BLC_wo_prefix))
+            x_BLC_body_len = x_BLC_body.shape[1]
+            sos_len = sos.shape[1]
+            if self.enable_cubemap:
+                sos = sos.unsqueeze(0).repeat(N, 1, 1, 1)
+                x_BLC_body = rearrange(x_BLC_body, '(b n) l c -> n b l c', b=B, n=N)
+
+                x_BLC = torch.cat((sos, x_BLC_body), dim=2)
+
+                x_BLC = rearrange(x_BLC, 'n b l c -> b (n l) c')
+
+            else:
+                x_BLC = torch.cat((sos, x_BLC_body), dim=1)
+
+           
+            
 
             # [1.1. pad the seqlen dim]
-            l_end = x_BLC.shape[1]
-            need_to_pad = (l_end + self.pad_to_multiplier - 1) // self.pad_to_multiplier * self.pad_to_multiplier - l_end # 0
+            l_end = sos_len + x_BLC_body_len 
+            if self.enable_cubemap:
+                cubemap_l_end = x_BLC.shape[1]
+                need_to_pad = (cubemap_l_end + self.pad_to_multiplier - 1) // self.pad_to_multiplier * self.pad_to_multiplier - cubemap_l_end # 0
+            else:
+                need_to_pad = (l_end + self.pad_to_multiplier - 1) // self.pad_to_multiplier * self.pad_to_multiplier - l_end # 0
+            
             
             if self.customized_flash_attn:
                 Infinity_visible_kvlen = self.Infinity_visible_kvlen[:l_end]
@@ -413,10 +454,20 @@ class Infinity(nn.Module):
                 assert x_BLC.shape[-1] % 128 == 0, 'x_BLC.shape[-1] % 128 != 0'
                 attn_bias_or_two_vector = None
             else:
+               
                 d: torch.Tensor = torch.cat([torch.full((pn[0]*pn[1]*pn[2],), i) for i, pn in enumerate(scale_schedule)]).view(1, l_end, 1)
                 dT = d.transpose(1, 2)    # dT: 11L
                 attn_bias_for_masking = torch.where(d >= dT, 0., -torch.inf).reshape(1, 1, l_end, l_end)
+                
                 attn_bias = attn_bias_for_masking[:, :, :l_end, :l_end].contiguous()   # attn_bias: 11LL
+
+                if self.enable_cubemap:
+                    attn_bias = attn_bias.repeat(N, 1, 1, 1)
+                    attn_bias = rearrange(attn_bias, 'n c l1 l2 -> c (n l1) l2').unsqueeze(0)
+                    attn_bias = attn_bias.repeat(N, 1, 1, 1)
+                    attn_bias = rearrange(attn_bias, 'n c l1 l2 -> c l1  (n l2)').unsqueeze(0)
+                
+                
                 if need_to_pad:
                     attn_bias = F.pad(attn_bias, (0, need_to_pad, 0, need_to_pad), value=-torch.inf)
                     attn_bias[0, 0, l_end:, 0] = 0
@@ -427,6 +478,9 @@ class Infinity(nn.Module):
             attn_fn = self.attn_fn_compile_dict[tuple(scale_schedule)]
         else:
             attn_fn = None
+
+
+ 
 
         # [2. block loop]
         SelfAttnBlock.forward, CrossAttnBlock.forward
@@ -450,7 +504,13 @@ class Infinity(nn.Module):
                 x_BLC = chunk(x=x_BLC, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=attn_bias_or_two_vector, attn_fn=attn_fn, scale_schedule=scale_schedule, checkpointing_full_block=checkpointing_full_block, rope2d_freqs_grid=self.rope2d_freqs_grid)
 
         # [3. unpad the seqlen dim, and then get logits]
-        return self.get_logits(x_BLC[:, :l_end], cond_BD)    # return logits BLV, V is vocab_size
+        l_end = l_end if not self.enable_cubemap else l_end * 6
+        # raise
+        pred_logit = self.get_logits(x_BLC[:, :l_end], cond_BD)    # return logits BLV, V is vocab_size
+        if self.enable_cubemap:
+            pred_logit = rearrange(pred_logit, 'b (n l) v -> (b n) l v', n=6)
+            
+        return pred_logit
 
     @torch.no_grad()
     def autoregressive_infer_cfg(

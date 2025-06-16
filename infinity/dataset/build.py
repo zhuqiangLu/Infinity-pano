@@ -144,6 +144,8 @@ def build_t2i_dataset(
             enable_dynamic_length_prompt=args.enable_dynamic_length_prompt,
             seed=args.seed if args.seed is not None else int(time.time()),
             pano_aug=args.pano_aug if args.pano_aug is not None else False,
+            enable_cubemap=args.enable_cubemap if args.enable_cubemap is not None else False,
+            cubemap_size=args.cubemap_size if args.cubemap_size is not None else 512,
         )
     else:
         raise ValueError(f'args.use_streaming_dataset={args.use_streaming_dataset} unsupported')

@@ -53,13 +53,13 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 # wandb offline
 exp_name=debug
 bed_path=checkpoints/${exp_name}/
-data_path='data/infinity_toy_data/splits'
+data_path='data/mp3d/splits'
 video_data_path=''
 local_out_path=$LOCAL_OUT/${exp_name}
 
 rm -rf ${bed_path}
 rm -rf ${local_out_path}
-
+export WANDB_MODE=disabled
 torchrun \
 --nproc_per_node=${nproc_per_node} \
 --nnodes=${nnodes} \
@@ -67,10 +67,11 @@ torchrun \
 --master_addr=${master_addr} \
 --master_port=${master_port} \
 train.py \
---ep=4 \
+train.py \
+--ep=100 \
 --opt=adamw \
 --cum=3 \
---sche=lin0 \
+--sche=cos \
 --fp16=2 \
 --ada=0.9_0.97 \
 --tini=-1 \
@@ -80,26 +81,26 @@ train.py \
 --saln=1 \
 --cos=1 \
 --enable_checkpointing=full-block \
+--rush_resume='./weights/infinity_125M_256x256.pth' \
 --local_out_path ${local_out_path} \
 --task_type='t2i' \
 --bed=${bed_path} \
 --data_path=${data_path} \
 --video_data_path=${video_data_path} \
 --exp_name=${exp_name} \
---tblr=6e-3 \
+--tblr=1e-4 \
 --pn 0.06M \
---model=2bc8 \
---lbs=4 \
---workers=2 \
+--model=layer12c4 \
+--lbs=2 \
+--workers=16 \
 --short_cap_prob 0.5 \
 --online_t5=1 \
 --use_streaming_dataset 1 \
 --iterable_data_buffersize 30000 \
 --Ct5=2048 \
 --t5_path=weights/flan-t5-xl \
---vae_type 32 \
---vae_ckpt=weights/infinity_vae_d32_rdn_short.pth  \
---rush_resume='/path_to/huggingface_models/FoundationVision-Infinity/infinity_2b_reg.pth' \
+--vae_type 16 \
+--vae_ckpt="weights/infinity_vae_d16.pth"  \
 --wp 0.00000001 \
 --wpe=1 \
 --dynamic_resolution_across_gpus 1 \
@@ -112,7 +113,7 @@ train.py \
 --always_training_scales 100 \
 --use_bit_label 1 \
 --zero=2 \
---save_model_iters_freq 500 \
+--save_model_iters_freq 3000 \
 --log_freq=50 \
 --checkpoint_type='torch' \
 --prefetch_factor=16 \
@@ -120,4 +121,7 @@ train.py \
 --noise_apply_layers 13 \
 --apply_spatial_patchify 0 \
 --use_flex_attn=False \
---pad=128
+--pano_aug=True \
+--enable_cubemap=True \
+--cubemap_size=256 \
+--pad=128 

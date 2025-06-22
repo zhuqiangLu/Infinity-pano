@@ -9,8 +9,8 @@ model_type=infinity_layer12
 use_scale_schedule_embedding=0
 use_bit_label=1
 checkpoint_type='torch'
-# infinity_model_path=weights/infinity_125M_256x256.pth
-infinity_model_path=checkpoints/mp3d_cube_map_125m/ar-ckpt-giter003K-ep93-iter24-last.pth
+infinity_model_path=weights/infinity_125M_256x256.pth
+# infinity_model_path=checkpoints/mp3d_cube_map_125m/ar-ckpt-giter003K-ep93-iter24-last.pth
 vae_type=16
 vae_path=weights/infinity_vae_d16.pth
 cfg=4
@@ -45,6 +45,5 @@ python3 run_infinity.py \
 --seed 1 \
 --use_flex_attn 0 \
 --h_div_w_template 1 \
---enable_cubemap \
 --enable_model_cache 1 \
 --save_file pano

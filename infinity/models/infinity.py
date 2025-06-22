@@ -638,7 +638,6 @@ class Infinity(nn.Module):
                 
                 if enable_cubemap and block_idx == 0: 
                     last_stage = rearrange(last_stage, '(b n) l c -> b (n l) c', n=6)
-                print("pre input shape", last_stage.shape)
                 for m in b.module:
                     last_stage = m(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=None, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=self.rope2d_freqs_grid, scale_ind=si)
                     
@@ -665,6 +664,7 @@ class Infinity(nn.Module):
                 logits_BlV = logits_BlV.reshape(tmp_bs, -1, 2)
                 idx_Bld = sample_with_top_k_top_p_also_inplace_modifying_logits_(logits_BlV, rng=rng, top_k=top_k or self.top_k, top_p=top_p or self.top_p, num_samples=1)[:, :, 0]
                 idx_Bld = idx_Bld.reshape(tmp_bs, tmp_seq_len, -1)
+                print("idx_Bld shape", idx_Bld.shape, "logits_BlV shape", logits_BlV.shape, "last_stage shape", last_stage.shape)
                 
             else:
                 idx_Bl = sample_with_top_k_top_p_also_inplace_modifying_logits_(logits_BlV, rng=rng, top_k=top_k or self.top_k, top_p=top_p or self.top_p, num_samples=1)[:, :, 0]
@@ -690,9 +690,11 @@ class Infinity(nn.Module):
 
                 idx_Bld_list.append(idx_Bld)
                 codes = vae.quantizer.lfq.indices_to_codes(idx_Bld, label_type='bit_label') # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
+                print("codes shape", codes.shape, "idx_Bld shape", idx_Bld.shape)
                 if si != num_stages_minus_1:
                     summed_codes += F.interpolate(codes, size=vae_scale_schedule[-1], mode=vae.quantizer.z_interplote_up)
                     last_stage = F.interpolate(summed_codes, size=vae_scale_schedule[si+1], mode=vae.quantizer.z_interplote_up) # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
+                    print("summed_codes shape", summed_codes.shape, "last_stage shape", last_stage.shape)
                     last_stage = last_stage.squeeze(-3) # [B, d, h, w] or [B, d, 2h, 2w]
                     if self.apply_spatial_patchify: # patchify operation
                         last_stage = torch.nn.functional.pixel_unshuffle(last_stage, 2) # [B, 4d, h, w]

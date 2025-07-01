@@ -295,7 +295,7 @@ class T2IIterableDataset(IterableDataset):
                 for idx, image in enumerate(images):
                     ret = equi2cube(image,rots=rot, w_face=self.cubemap_size, mode='bilinear', cube_format='dict')
                     # saved as F,R,B,L,U,D
-                    cubemap = torch.stack([ret[key] for key in ['F', 'R', 'B', 'L', 'U', 'D']])
+                    cubemap = torch.stack([ret[key] for key in ['F', 'R', 'L', 'B', 'D', 'U']])
                     cubemaps.append(cubemap)
                 images = torch.stack(cubemaps, dim=0)    
 

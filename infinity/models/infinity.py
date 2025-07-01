@@ -20,7 +20,7 @@ from einops import rearrange
 
 import infinity.utils.dist as dist
 from infinity.utils.dist import for_visualize
-from infinity.models.basic import flash_attn_func, flash_fused_op_installed, AdaLNBeforeHead, CrossAttnBlock, SelfAttnBlock, CrossAttention, FastRMSNorm, precompute_rope2d_freqs_grid
+from infinity.models.basic import flash_attn_func, flash_fused_op_installed, AdaLNBeforeHead, CrossAttnBlock, SelfAttnBlock, CrossAttention, FastRMSNorm, precompute_rope2d_freqs_grid, precompute_rope2d_freqs_grid_geo
 from infinity.utils import misc
 from infinity.models.flex_attn import FlexAttn
 from infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
@@ -63,13 +63,13 @@ class MultipleLayers(nn.Module):
         for i in range(index, index+num_blocks_in_a_chunk):
             self.module.append(ls[i])
 
-    def forward(self, x, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn=None, scale_schedule=None, checkpointing_full_block=False, rope2d_freqs_grid=None):
+    def forward(self, x, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn=None, scale_schedule=None, checkpointing_full_block=False, rope2d_freqs_grid=None, need_to_pad=0):
         h = x
         for m in self.module:
             if checkpointing_full_block:
-                h = torch.utils.checkpoint.checkpoint(m, h, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, use_reentrant=False)
+                h = torch.utils.checkpoint.checkpoint(m, h, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad, use_reentrant=False)
             else:
-                h = m(h, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid)
+                h = m(h, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad)
         return h
 
 class Infinity(nn.Module):
@@ -219,9 +219,15 @@ class Infinity(nn.Module):
         nn.init.trunc_normal_(self.pos_start.data, mean=0, std=init_std)
         if self.rope2d_each_sa_layer:
             rope2d_freqs_grid = precompute_rope2d_freqs_grid(dim=self.C//self.num_heads, dynamic_resolution_h_w=dynamic_resolution_h_w, pad_to_multiplier=self.pad_to_multiplier, rope2d_normalized_by_hw=self.rope2d_normalized_by_hw)
+
             self.rope2d_freqs_grid = rope2d_freqs_grid
+
         else:
             raise ValueError(f'self.rope2d_each_sa_layer={self.rope2d_each_sa_layer} not implemented')
+
+        if self.enable_cubemap:
+            rope2d_freqs_grid = precompute_rope2d_freqs_grid_geo(dim=self.C//self.num_heads, dynamic_resolution_h_w=dynamic_resolution_h_w, pad_to_multiplier=self.pad_to_multiplier, rope2d_normalized_by_hw=self.rope2d_normalized_by_hw)
+            self.rope2d_freqs_grid = rope2d_freqs_grid
         self.lvl_embed = nn.Embedding(15, self.C)
         nn.init.trunc_normal_(self.lvl_embed.weight.data, mean=0, std=init_std)
         
@@ -474,6 +480,7 @@ class Infinity(nn.Module):
                     x_BLC = F.pad(x_BLC, (0, 0, 0, need_to_pad))
                 attn_bias_or_two_vector = attn_bias.type_as(x_BLC).to(x_BLC.device)
         
+        
         if self.use_flex_attn:
             attn_fn = self.attn_fn_compile_dict[tuple(scale_schedule)]
         else:
@@ -485,6 +492,7 @@ class Infinity(nn.Module):
         # [2. block loop]
         SelfAttnBlock.forward, CrossAttnBlock.forward
         checkpointing_full_block = self.checkpointing == 'full-block' and self.training
+
         if self.num_block_chunks == 1:
             for i, b in enumerate(self.blocks):
                 if self.add_lvl_embeding_only_first_block and i == 0:
@@ -501,7 +509,7 @@ class Infinity(nn.Module):
                     x_BLC = self.add_lvl_embeding_for_x_BLC(x_BLC, scale_schedule, need_to_pad)
                 if not self.add_lvl_embeding_only_first_block:
                     x_BLC = self.add_lvl_embeding_for_x_BLC(x_BLC, scale_schedule, need_to_pad)
-                x_BLC = chunk(x=x_BLC, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=attn_bias_or_two_vector, attn_fn=attn_fn, scale_schedule=scale_schedule, checkpointing_full_block=checkpointing_full_block, rope2d_freqs_grid=self.rope2d_freqs_grid)
+                x_BLC = chunk(x=x_BLC, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=attn_bias_or_two_vector, attn_fn=attn_fn, scale_schedule=scale_schedule, checkpointing_full_block=checkpointing_full_block, rope2d_freqs_grid=self.rope2d_freqs_grid, need_to_pad=need_to_pad)
 
         # [3. unpad the seqlen dim, and then get logits]
         l_end = l_end if not self.enable_cubemap else l_end * 6
@@ -657,14 +665,14 @@ class Infinity(nn.Module):
             
             if enable_cubemap:
                 logits_BlV = rearrange(logits_BlV, 'b (n l) c -> (b n) l c', n=6)
-            print("logits_BlV shape", logits_BlV.shape)
+            # print("logits_BlV shape", logits_BlV.shape)
             
             if self.use_bit_label:
                 tmp_bs, tmp_seq_len = logits_BlV.shape[:2]
                 logits_BlV = logits_BlV.reshape(tmp_bs, -1, 2)
                 idx_Bld = sample_with_top_k_top_p_also_inplace_modifying_logits_(logits_BlV, rng=rng, top_k=top_k or self.top_k, top_p=top_p or self.top_p, num_samples=1)[:, :, 0]
                 idx_Bld = idx_Bld.reshape(tmp_bs, tmp_seq_len, -1)
-                print("idx_Bld shape", idx_Bld.shape, "logits_BlV shape", logits_BlV.shape, "last_stage shape", last_stage.shape)
+                # print("idx_Bld shape", idx_Bld.shape, "logits_BlV shape", logits_BlV.shape, "last_stage shape", last_stage.shape)
                 
             else:
                 idx_Bl = sample_with_top_k_top_p_also_inplace_modifying_logits_(logits_BlV, rng=rng, top_k=top_k or self.top_k, top_p=top_p or self.top_p, num_samples=1)[:, :, 0]
@@ -690,11 +698,11 @@ class Infinity(nn.Module):
 
                 idx_Bld_list.append(idx_Bld)
                 codes = vae.quantizer.lfq.indices_to_codes(idx_Bld, label_type='bit_label') # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
-                print("codes shape", codes.shape, "idx_Bld shape", idx_Bld.shape)
+                # print("codes shape", codes.shape, "idx_Bld shape", idx_Bld.shape)
                 if si != num_stages_minus_1:
                     summed_codes += F.interpolate(codes, size=vae_scale_schedule[-1], mode=vae.quantizer.z_interplote_up)
                     last_stage = F.interpolate(summed_codes, size=vae_scale_schedule[si+1], mode=vae.quantizer.z_interplote_up) # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
-                    print("summed_codes shape", summed_codes.shape, "last_stage shape", last_stage.shape)
+                    # print("summed_codes shape", summed_codes.shape, "last_stage shape", last_stage.shape)
                     last_stage = last_stage.squeeze(-3) # [B, d, h, w] or [B, d, 2h, 2w]
                     if self.apply_spatial_patchify: # patchify operation
                         last_stage = torch.nn.functional.pixel_unshuffle(last_stage, 2) # [B, 4d, h, w]

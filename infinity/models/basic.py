@@ -19,7 +19,7 @@ from flash_attn import flash_attn_func                  # q, k, or v: BLHc, ret:
 from flash_attn import flash_attn_varlen_kvpacked_func  # qkv: N3Hc, ret: NHc
 
 from torch.nn.functional import scaled_dot_product_attention as slow_attn    # q, k, v: BHLc
-
+from einops import rearrange
 # Import flash_attn's fused ops
 try:
     from flash_attn.ops.layer_norm import dropout_add_layer_norm
@@ -33,6 +33,135 @@ except ImportError:
     
     def rms_norm_impl(x, weight, epsilon):
         return (x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True).add_(epsilon))) * weight
+
+
+
+
+
+
+def cubemap_face_directions(face, width, height):
+    # Normalized UV coordinates, centered in the middle of each pixel
+    u = (np.arange(width) + 0.5) / width  # shape: (width,)
+    v = (np.arange(height) + 0.5) / height  # shape: (height,)
+    uu, vv = np.meshgrid(u, v, indexing='xy')  # shape: (height, width)
+
+    x = 2 * uu - 1
+    y = 2 * vv - 1
+
+    if face == 'right':    # +X
+        dirs = np.stack([np.ones_like(x), -y, -x], axis=-1)
+    elif face == 'left':   # -X
+        dirs = np.stack([-np.ones_like(x), -y, x], axis=-1)
+    elif face == 'top':    # +Y
+        dirs = np.stack([x, np.ones_like(y), y], axis=-1)
+    elif face == 'bottom': # -Y
+        dirs = np.stack([x, -np.ones_like(y), -y], axis=-1)
+    elif face == 'front':  # +Z
+        dirs = np.stack([x, -y, np.ones_like(x)], axis=-1)
+    elif face == 'back':   # -Z
+        dirs = np.stack([-x, -y, -np.ones_like(x)], axis=-1)
+    else:
+        raise ValueError("Invalid face name")
+
+    # Normalize directions
+    norm = np.linalg.norm(dirs, axis=-1, keepdims=True)
+    
+    coor = dirs / norm
+    
+
+    return coor
+
+
+
+
+def precompute_rope2d_freqs_grid_geo(dim, dynamic_resolution_h_w, rope2d_normalized_by_hw, pad_to_multiplier=1, base=10000.0, device=None, scaling_factor=1.0):
+    # split the dimension into half, one for x and one for y
+    half_dim = dim // 2
+    max_x = max_y = max_z = 2048 // 16
+    
+    inv_freq = 1.0 / (base ** (torch.arange(0, half_dim, 3, dtype=torch.int64).float().to(device) / half_dim)) # namely theta, 1 / (10000^(i/half_dim)), i=0,2,..., half_dim-2
+    t_x = torch.arange(max_x, device=device, dtype=torch.int64).type_as(inv_freq)
+    t_y = torch.arange(max_y, device=device, dtype=torch.int64).type_as(inv_freq)
+    t_z = torch.arange(max_z, device=device, dtype=torch.int64).type_as(inv_freq)
+    t_x = t_x / scaling_factor
+    freqs_x = torch.outer(t_x, inv_freq)  # (max_x, dim / (1 for 1d, 2 for 2d, 3 for 3d) / 2), namely x*theta
+    t_y = t_y / scaling_factor
+    freqs_y = torch.outer(t_y, inv_freq)  # (max_y, dim / (1 for 1d, 2 for 2d, 3 for 3d) / 2), namely y*theta
+    t_z = t_z / scaling_factor
+    freqs_z = torch.outer(t_z, inv_freq)  # (max_z, dim / (1 for 1d, 2 for 2d, 3 for 3d) / 2), namely z*theta
+
+    
+
+
+
+    freqs_grid_map = torch.stack([
+        freqs_x[:, None, None, :].expand(-1, max_y, max_z, -1), # (max_x, max_y, max_z, dim / (1 for 1d, 2 for 2d, 3 for 3d) / 2)
+        freqs_y[None, :, None, :].expand(max_x, -1, max_z, -1), # (max_x, max_y, max_z, dim / (1 for 1d, 2 for 2d, 3 for 3d) / 2)
+        freqs_z[None, None, :, :].expand(max_x, max_y, -1, -1), # (max_x, max_y, max_z, dim / (1 for 1d, 2 for 2d, 3 for 3d) / 2)
+    ], dim=-1)  # (max_x, max_y, max_z, dim / (1 for 1d, 2 for 2d, 3 for 3d))
+
+
+    '''
+    next we precompute the grid for 6 faces of the cubemap of differrent sacle. 
+
+    As each face must be a sqaure, we only consider h_div_w=1.0 
+
+    '''
+    
+    scale_schedule = dynamic_resolution_h_w[1.0]['1M']['scales']
+
+    # get x y z  for 6 faces 
+    faces = ['front', 'right', 'left', 'back', 'bottom', 'top'] 
+    face_rope_dict = dict() 
+    rope_cache_list = []
+
+    rope2d_freqs_grid = dict()
+    for face in faces:
+        face_rope_cache = list()
+        for (_, ph, pw) in scale_schedule:
+            assert rope2d_normalized_by_hw == 2 
+            '''
+            for simplicity, we directly use star stylee 
+
+            '''
+
+            directions = cubemap_face_directions(face, ph, pw)
+            # directions = rearrange(directions, 'h w c -> (h w) c') 
+            directions = rearrange(directions, 'h w c -> (h w) c') 
+            directions_sign = torch.from_numpy(np.sign(directions)).to(freqs_grid_map.dtype)
+            directions = (np.abs(directions) * (max_x-1)).round()
+            
+            rope_cache = freqs_grid_map[directions[:,0], directions[:,1], directions[:,2]] 
+            rope_cache = rope_cache * directions_sign[:, None, :]
+            rope_cache = torch.stack([torch.cos(rope_cache), torch.sin(rope_cache)], dim=0)
+            rope_cache = torch.concat([rope_cache[:, :, :, 0], rope_cache[:, :, :, 1], rope_cache[:, :, :, 2]], dim=-1)
+            rope_cache = rope_cache.reshape(2, ph, pw, -1)
+            ph_mul_pw = ph * pw
+            face_rope_cache.append(rope_cache.reshape(2, ph_mul_pw, -1))
+
+        
+        cat_face_rope_cache = torch.cat(face_rope_cache, 1)
+        pad = torch.zeros(2, pad_to_multiplier - cat_face_rope_cache.shape[1] % pad_to_multiplier, half_dim)
+        cat_face_rope_cache = torch.cat([cat_face_rope_cache, pad], dim=1)
+        face_rope_dict[face] = cat_face_rope_cache[:, None, None, None, :]
+
+    
+    for face in faces:
+        rope2d_freqs_grid_face = dict()
+        for pn in dynamic_resolution_h_w[1.0]:
+            scale_schedule = dynamic_resolution_h_w[1.0][pn]['scales']
+            tmp_scale_schedule = [(1, h, w) for _, h, w in scale_schedule]
+            rope2d_freqs_grid_face[str(tuple(tmp_scale_schedule))] = face_rope_dict[face]
+        rope2d_freqs_grid[face] = rope2d_freqs_grid_face
+
+    
+
+
+    return rope2d_freqs_grid
+
+
+
+
 
 
 def precompute_rope2d_freqs_grid(dim, dynamic_resolution_h_w, rope2d_normalized_by_hw, pad_to_multiplier=1, max_height=2048 // 16, max_width=2048 // 16, base=10000.0, device=None, scaling_factor=1.0):
@@ -51,6 +180,8 @@ def precompute_rope2d_freqs_grid(dim, dynamic_resolution_h_w, rope2d_normalized_
     ], dim=-1)  # (max_height, max_width, dim / (1 for 1d, 2 for 2d, 3 for 3d))
     freqs_grid_map = torch.stack([torch.cos(freqs_grid_map), torch.sin(freqs_grid_map)], dim=0)
     # (2, max_height, max_width, dim / (1 for 1d, 2 for 2d, 3 for 3d))
+
+
 
     rope2d_freqs_grid = {}
     for h_div_w in dynamic_resolution_h_w:
@@ -97,6 +228,7 @@ def apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, pad_to_multiplier,
     qk = torch.stack((q, k), dim=0)  #(2, batch_size, heads, seq_len, head_dim)
     device_type = qk.device.type
     device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+    q_dtype = q.dtype
     with torch.autocast(device_type=device_type, enabled=False):
         seq_len = qk.shape[3]
         start = 0
@@ -106,6 +238,7 @@ def apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, pad_to_multiplier,
         rope2d_freqs_grid[str(tuple(scale_schedule))] = rope2d_freqs_grid[str(tuple(scale_schedule))].to(qk.device)
         assert start+seq_len <= rope2d_freqs_grid[str(tuple(scale_schedule))].shape[4]
         rope_cache = rope2d_freqs_grid[str(tuple(scale_schedule))][:, :, :, :, start:start+seq_len] # rope_cache shape: [2, 1, 1, 1, seq_len, half_head_dim]
+
         qk = qk.reshape(*qk.shape[:-1], -1, 2) #(2, batch_size, heads, seq_len, half_head_dim, 2)
         qk = torch.stack([
             rope_cache[0] * qk[...,0] - rope_cache[1] * qk[...,1],
@@ -113,6 +246,7 @@ def apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, pad_to_multiplier,
         ], dim=-1) # (2, batch_size, heads, seq_len, half_head_dim, 2), here stack + reshape should not be concate
         qk = qk.reshape(*qk.shape[:-2], -1) #(2, batch_size, heads, seq_len, head_dim)
         q, k = qk.unbind(dim=0) # (batch_size, heads, seq_len, head_dim)
+  
     return q, k
 
 
@@ -245,7 +379,7 @@ class SelfAttention(nn.Module):
         self.cached_v = None
     
     # NOTE: attn_bias_or_two_vector is None during inference
-    def forward(self, x, attn_bias_or_two_vector: Union[torch.Tensor, Tuple[torch.IntTensor, torch.IntTensor]], attn_fn=None, scale_schedule=None, rope2d_freqs_grid=None, scale_ind=0):
+    def forward(self, x, attn_bias_or_two_vector: Union[torch.Tensor, Tuple[torch.IntTensor, torch.IntTensor]], attn_fn=None, scale_schedule=None, rope2d_freqs_grid=None, need_to_pad=None, scale_ind=0):
         """
         :param (fp32) x: shaped (B or batch_size, L or seq_length, C or hidden_dim); if seq-parallel is used, the `L` dim would be shared
         :param (fp32) attn_bias_or_two_vector:
@@ -270,6 +404,11 @@ class SelfAttention(nn.Module):
                     a tuple of two 1-dim int vector (VAR_visible_kvlen, VAR_invisible_qlen)
         :return: shaped (B or batch_size, L or seq_length, C or hidden_dim); if seq-parallel is used, the `L` dim would be shared
         """
+        is_cubemap = False
+        if rope2d_freqs_grid is not None:
+            if list(rope2d_freqs_grid.keys()) == ['front', 'right', 'left', 'back', 'bottom', 'top']:
+                is_cubemap = True
+        
         # x: fp32
         B, L, C = x.shape
         
@@ -288,7 +427,26 @@ class SelfAttention(nn.Module):
             k = k.contiguous()      # bf16
             v = v.contiguous()      # bf16
         if rope2d_freqs_grid is not None:
-            q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind) #, freqs_cis=freqs_cis)
+            if is_cubemap:
+                assert need_to_pad is not None
+                face_seq_len = (q.shape[2] - need_to_pad) // 6 
+                tmp_q = list() 
+                tmp_k = list()
+                start_idx = 0
+                for face_name, face_rope_cache in rope2d_freqs_grid.items():
+                    face_q, face_k = apply_rotary_emb(q[:, :, start_idx:start_idx+face_seq_len], k[:, :, start_idx:start_idx+face_seq_len], scale_schedule, face_rope_cache, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind) #, freqs_cis=freqs_cis)
+                    tmp_q.append(face_q)
+                    tmp_k.append(face_k)
+                    start_idx += face_seq_len
+                face_q = torch.cat(tmp_q, dim=2)
+                face_k = torch.cat(tmp_k, dim=2)
+                face_q = torch.cat((face_q, q[:, :, -need_to_pad:]), dim=2)
+                face_k = torch.cat((face_k, k[:, :, -need_to_pad:]), dim=2)
+                q = face_q
+                k = face_k
+
+            else:
+                q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind) #, freqs_cis=freqs_cis)
         if self.caching:    # kv caching: only used during inference
             if self.cached_k is None: self.cached_k = k; self.cached_v = v
             else: k = self.cached_k = torch.cat((self.cached_k, k), dim=L_dim); v = self.cached_v = torch.cat((self.cached_v, v), dim=L_dim)
@@ -491,7 +649,7 @@ class CrossAttnBlock(nn.Module):
         self.checkpointing_sa_only = checkpointing_sa_only
     
     # NOTE: attn_bias_or_two_vector is None during inference
-    def forward(self, x, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn=None, scale_schedule=None, rope2d_freqs_grid=None, scale_ind=0):    # todo: minGPT and vqgan also uses pre-norm, just like this, while MaskGiT uses post-norm
+    def forward(self, x, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn=None, scale_schedule=None, rope2d_freqs_grid=None, need_to_pad=None, scale_ind=0):    # todo: minGPT and vqgan also uses pre-norm, just like this, while MaskGiT uses post-norm
         with torch.cuda.amp.autocast(enabled=False):    # disable half precision
             if self.shared_aln: # always True;                   (1, 1, 6, C)  + (B, 1, 6, C)
                 gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2) # 116C + B16C =unbind(2)=> 6 B1C
@@ -501,18 +659,18 @@ class CrossAttnBlock(nn.Module):
         if self.fused_norm_func is None:
             x_sa = self.ln_wo_grad(x.float()).mul(scale1.add(1)).add_(shift1)
             if self.checkpointing_sa_only and self.training:
-                x_sa = checkpoint(self.sa, x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, use_reentrant=False)
+                x_sa = checkpoint(self.sa, x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad, use_reentrant=False)
             else:
-                x_sa = self.sa(x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid)
+                x_sa = self.sa(x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad=need_to_pad)
             x = x + self.drop_path(x_sa.mul_(gamma1))
             x = x + self.ca(self.ca_norm(x), ca_kv).float().mul_(self.ca_gamma)
             x = x + self.drop_path(self.ffn( self.ln_wo_grad(x.float()).mul(scale2.add(1)).add_(shift2) ).mul(gamma2)) # this mul(gamma2) cannot be in-placed cuz we possibly use FusedMLP
         else:
             x_sa = self.fused_norm_func(C=self.C, eps=self.norm_eps, x=x, scale=scale1, shift=shift1)
             if self.checkpointing_sa_only and self.training:
-                x_sa = checkpoint(self.sa, x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, use_reentrant=False)
+                x_sa = checkpoint(self.sa, x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad, use_reentrant=False)
             else:
-                x_sa = self.sa(x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, scale_ind=scale_ind)
+                x_sa = self.sa(x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad=need_to_pad, scale_ind=scale_ind)
             x = x + self.drop_path(x_sa.mul_(gamma1))
             x = x + self.ca(self.ca_norm(x), ca_kv).float().mul_(self.ca_gamma)
             x = x + self.drop_path(self.ffn(self.fused_norm_func(C=self.C, eps=self.norm_eps, x=x, scale=scale2, shift=shift2)).mul(gamma2)) # this mul(gamma2) cannot be in-placed cuz we possibly use FusedMLP

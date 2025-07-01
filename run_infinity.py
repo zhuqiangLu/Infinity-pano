@@ -433,6 +433,6 @@ if __name__ == '__main__':
         # generated_image = equilib.cubemap_to_equirect(generated_image)
         # cv2.imwrite(osp.join(args.save_file, 'pano.jpg'), generated_image.cpu().numpy())
     else:
-        os.makedirs(osp.dirname(osp.abspath(args.save_file)), exist_ok=True)
-        cv2.imwrite(args.save_file, generated_image.cpu().numpy())
+        os.makedirs(osp.dirname(osp.abspath(args.save_file+'.jpg')), exist_ok=True)
+        cv2.imwrite(args.save_file+'.jpg', generated_image.cpu().numpy())
         print(f'Save to {osp.abspath(args.save_file)}')

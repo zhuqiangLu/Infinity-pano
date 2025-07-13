@@ -429,6 +429,7 @@ class SelfAttention(nn.Module):
         if rope2d_freqs_grid is not None:
             if is_cubemap:
                 assert need_to_pad is not None
+                # print(q.shape, k.shape, need_to_pad)
                 face_seq_len = (q.shape[2] - need_to_pad) // 6 
                 tmp_q = list() 
                 tmp_k = list()
@@ -440,8 +441,10 @@ class SelfAttention(nn.Module):
                     start_idx += face_seq_len
                 face_q = torch.cat(tmp_q, dim=2)
                 face_k = torch.cat(tmp_k, dim=2)
-                face_q = torch.cat((face_q, q[:, :, -need_to_pad:]), dim=2)
-                face_k = torch.cat((face_k, k[:, :, -need_to_pad:]), dim=2)
+                if need_to_pad > 0: 
+                    # when need_to_pad == 0, we say it is in inference mode, so we don't need to pad
+                    face_q = torch.cat((face_q, q[:, :, -need_to_pad:]), dim=2)
+                    face_k = torch.cat((face_k, k[:, :, -need_to_pad:]), dim=2)
                 q = face_q
                 k = face_k
 

@@ -1,5 +1,6 @@
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ['TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD'] = '1'
 import os.path as osp
 from typing import List
 import math
@@ -428,10 +429,18 @@ if __name__ == '__main__':
             )
     if args.enable_cubemap:
         os.makedirs(args.save_file, exist_ok=True)
-        for i, img in enumerate(generated_image):
-            cv2.imwrite(osp.join(args.save_file, f'{i}.jpg'), img.cpu().numpy())
-        # generated_image = equilib.cubemap_to_equirect(generated_image)
-        # cv2.imwrite(osp.join(args.save_file, 'pano.jpg'), generated_image.cpu().numpy())
+        faces = list(infinity.rope2d_freqs_grid.keys())
+        cubemap_dict = dict()
+        keys = ['F', 'R', 'L', 'B', 'D', 'U']
+        for i, img in enumerate(generated_image):   
+            cv2.imwrite(osp.join(args.save_file, f'{keys[i]}.jpg'), img.cpu().numpy())
+            cubemap_dict[keys[i]] = img.permute(2, 0, 1)
+
+        
+        generated_image = equilib.cube2equi(cubemap_dict, cube_format='dict', width=1024, height=512,)
+        ret = cv2.imwrite(osp.join(args.save_file, 'pano.jpg'), generated_image.permute(1,2,0).cpu().numpy())
+        print(ret)
+        raise
     else:
         os.makedirs(osp.dirname(osp.abspath(args.save_file+'.jpg')), exist_ok=True)
         cv2.imwrite(args.save_file+'.jpg', generated_image.cpu().numpy())

@@ -543,6 +543,9 @@ class Infinity(nn.Module):
         assert len(cfg_list) >= len(scale_schedule)
         assert len(tau_list) >= len(scale_schedule)
 
+        if enable_cubemap:
+            self.rope2d_freqs_grid = precompute_rope2d_freqs_grid_geo(dim=self.C//self.num_heads, dynamic_resolution_h_w=dynamic_resolution_h_w, pad_to_multiplier=self.pad_to_multiplier, rope2d_normalized_by_hw=self.rope2d_normalized_by_hw)
+            
         # scale_schedule is used by infinity, vae_scale_schedule is used by vae if there exists a spatial patchify, 
         # we need to convert scale_schedule to vae_scale_schedule by multiply 2 to h and w
         if self.apply_spatial_patchify:
@@ -647,14 +650,14 @@ class Infinity(nn.Module):
                 if enable_cubemap and block_idx == 0: 
                     last_stage = rearrange(last_stage, '(b n) l c -> b (n l) c', n=6)
                 for m in b.module:
-                    last_stage = m(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=None, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=self.rope2d_freqs_grid, scale_ind=si)
+                    last_stage = m(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=None, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=self.rope2d_freqs_grid, scale_ind=si, need_to_pad=need_to_pad)
                     
                     if (cfg != 1) and (layer_idx in abs_cfg_insertion_layers):
                         # print(f'add cfg={cfg} on {layer_idx}-th layer output')
                         last_stage = cfg * last_stage[:B] + (1-cfg) * last_stage[B:]
                         last_stage = torch.cat((last_stage, last_stage), 0)
                     layer_idx += 1
-                    
+            
 
             if (cfg != 1) and add_cfg_on_logits:
                 # print(f'add cfg on add_cfg_on_logits')

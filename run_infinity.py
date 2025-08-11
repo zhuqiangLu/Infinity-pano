@@ -142,7 +142,7 @@ def get_prompt_id(prompt):
     return prompt_id
 
 def save_slim_model(infinity_model_path, save_file=None, device='cpu', key='gpt_fsdp'):
-    print('[Save slim model]')
+    print('[Save slim model]', infinity_model_path)
     full_ckpt = torch.load(infinity_model_path, map_location=device)
     infinity_slim = full_ckpt['trainer'][key]
     # ema_state_dict = cpu_d['trainer'].get('gpt_ema_fsdp', state_dict)
@@ -440,7 +440,6 @@ if __name__ == '__main__':
         generated_image = equilib.cube2equi(cubemap_dict, cube_format='dict', width=1024, height=512,)
         ret = cv2.imwrite(osp.join(args.save_file, 'pano.jpg'), generated_image.permute(1,2,0).cpu().numpy())
         print(ret)
-        raise
     else:
         os.makedirs(osp.dirname(osp.abspath(args.save_file+'.jpg')), exist_ok=True)
         cv2.imwrite(args.save_file+'.jpg', generated_image.cpu().numpy())

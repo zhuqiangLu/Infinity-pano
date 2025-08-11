@@ -183,10 +183,10 @@ class T2IIterableDataset(IterableDataset):
             futures = {executor.submit(split_and_sleep, generator_info): h_div_w_template for h_div_w_template, generator_info in self.h_div_w_template2generator.items()}
             for future in concurrent.futures.as_completed(futures):
                 h_div_w_template = futures[future]
-                try:
-                    self.h_div_w_template2generator[h_div_w_template] = future.result()
-                except Exception as exc:
-                    print(f'[data preprocess] h_div_w_template {h_div_w_template} generated an exception: {exc}')
+                # try:
+                self.h_div_w_template2generator[h_div_w_template] = future.result()
+                # except Exception as exc:
+                #     print(f'[data preprocess] h_div_w_template {h_div_w_template} generated an exception: {exc}')
 
         print('[data preprocess] split_meta_files done')
 
@@ -301,6 +301,7 @@ class T2IIterableDataset(IterableDataset):
 
 
                 images = rearrange(images, 'b n c h w -> (b n) c h w')
+
             
                 
                     

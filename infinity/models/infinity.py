@@ -20,7 +20,21 @@ from einops import rearrange
 
 import infinity.utils.dist as dist
 from infinity.utils.dist import for_visualize
-from infinity.models.basic import flash_attn_func, flash_fused_op_installed, AdaLNBeforeHead, CrossAttnBlock, SelfAttnBlock, CrossAttention, FastRMSNorm, precompute_rope2d_freqs_grid, precompute_rope2d_freqs_grid_geo
+from infinity.models.basic import flash_attn_func, flash_fused_op_installed, AdaLNBeforeHead, CrossAttnBlock, SelfAttnBlock, CrossAttention, FastRMSNorm, precompute_rope2d_freqs_grid
+import os 
+
+ROPE_IMP = os.environ.get('ROPE_IMP', 'geo')
+if ROPE_IMP == 'geo':   
+    print(f'ROPE_IMP={ROPE_IMP} for this experiment')
+    from infinity.models.basic import precompute_rope2d_freqs_grid_geo 
+elif ROPE_IMP == 'geo_interleaved':
+    print(f'ROPE_IMP={ROPE_IMP} for this experiment')
+    from infinity.models.basic import precompute_rope2d_freqs_grid_geo_interleaved as precompute_rope2d_freqs_grid_geo
+else:
+    raise ValueError(f'ROPE_IMP={ROPE_IMP} not implemented')
+
+
+
 from infinity.utils import misc
 from infinity.models.flex_attn import FlexAttn
 from infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
@@ -147,6 +161,7 @@ class Infinity(nn.Module):
         self.pad_to_multiplier = max(1, pad_to_multiplier)
         
         customized_kernel_installed = any('Infinity' in arg_name for arg_name in flash_attn_func.__code__.co_varnames)
+        print(f'customized_kernel_installed: {customized_kernel_installed}, customized_flash_attn: {customized_flash_attn}')
         self.customized_flash_attn = customized_flash_attn and customized_kernel_installed
         if customized_flash_attn and not customized_kernel_installed:
             import inspect, warnings
@@ -317,7 +332,10 @@ class Infinity(nn.Module):
                 scale_schedule = full_scale_schedule[:scales_num]
                 scale_schedule = [ (min(t, self.video_frames//4+1), h, w) for (t,h, w) in scale_schedule]
                 patchs_nums_tuple = tuple(scale_schedule)
-                SEQ_L = sum( pt * ph * pw for pt, ph, pw in patchs_nums_tuple)
+                if self.enable_cubemap:
+                    SEQ_L = sum( pt * ph * pw for pt, ph, pw in patchs_nums_tuple) * 6
+                else:
+                    SEQ_L = sum( pt * ph * pw for pt, ph, pw in patchs_nums_tuple)
                 aligned_L = SEQ_L+ (self.pad_to_multiplier - SEQ_L % self.pad_to_multiplier) if SEQ_L % self.pad_to_multiplier != 0 else SEQ_L
                 attn_fn = FlexAttn(block_scales = patchs_nums_tuple,
                                         mask_type = mask_type,

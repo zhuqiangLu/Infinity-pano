@@ -88,9 +88,11 @@ class CKPTSaver(object):
                 self.time_stamp[0] = time.time()
 
                 def auto_sync(source_filename, target_filename):
-                    cmd = f'cp -r {source_filename} {target_filename}'
-                    self.sp_backup = subprocess.Popen(cmd, shell=True, bufsize=-1)
-                    print(f'[CKPTSaver] auto_save cmd: {cmd}', flush=True)
+                    print(f'[CKPTSaver] auto_save cmd does not run', flush=True)
+                    return None
+                    # cmd = f'cp -r {source_filename} {target_filename}'
+                    # self.sp_backup = subprocess.Popen(cmd, shell=True, bufsize=-1)
+                    # print(f'[CKPTSaver] auto_save cmd: {cmd}', flush=True)
 
                 local_files = glob.glob(f"{args.local_out_path}/*")
                 for filename in local_files:

@@ -20,6 +20,7 @@ from flash_attn import flash_attn_varlen_kvpacked_func  # qkv: N3Hc, ret: NHc
 
 from torch.nn.functional import scaled_dot_product_attention as slow_attn    # q, k, v: BHLc
 from einops import rearrange
+import flash_attn
 # Import flash_attn's fused ops
 try:
     from flash_attn.ops.layer_norm import dropout_add_layer_norm
@@ -73,11 +74,122 @@ def cubemap_face_directions(face, width, height):
 
 
 
+def precompute_rope2d_freqs_grid_geo_interleaved(dim, dynamic_resolution_h_w, rope2d_normalized_by_hw, pad_to_multiplier=1, base=100000.0, device=None, scaling_factor=1.0):
+    # split the dimension into half, one for x and one for y
+
+    scale_schedule = dynamic_resolution_h_w[1.0]['1M']['scales']
+    max_t = 0 
+    for (_, ph, pw) in scale_schedule:
+        if max_t < ph * pw:
+            max_t = ph * pw
+
+
+    max_t += max_t % 3 + 1
+
+    max_t = 2048 // 16
+    max_t *= 3
+    # max_t += max_t % 3 + 1
+
+    
+    
+    
+    half_dim = dim // 2
+    
+    inv_freq = 1.0 / (base ** (torch.arange(0, half_dim, 3, dtype=torch.int64).float().to(device) / half_dim)) # namely theta, 1 / (10000^(i/half_dim)), i=0,2,..., half_dim-2
+    t = torch.arange(max_t, device=device, dtype=torch.int64).type_as(inv_freq)
+    t = t / scaling_factor
+    freqs = torch.outer(t, inv_freq)  # (max_x, dim / (1 for 1d, 2 for 2d, 3 for 3d) / 2), namely x*theta
+    all_idx = list(range(0, freqs.shape[0]))
+    X = freqs[all_idx[0::3], :]
+    Y = freqs[all_idx[1::3], :]
+    Z = freqs[all_idx[2::3], :]
+
+    max_x = X.shape[0]
+
+    
+
+
+
+    
+
+
+    '''
+    next we precompute the grid for 6 faces of the cubemap of differrent sacle. 
+
+    As each face must be a sqaure, we only consider h_div_w=1.0 
+
+    '''
+    
+    
+
+    # get x y z  for 6 faces 
+    faces = ['front', 'right', 'left', 'back', 'bottom', 'top'] 
+    face_rope_dict = dict() 
+    rope_cache_list = []
+
+    rope2d_freqs_grid = dict()
+    for face in faces:
+        face_rope_cache = list()
+        for (_, ph, pw) in scale_schedule:
+            assert rope2d_normalized_by_hw == 2 
+            '''
+            for simplicity, we directly use star stylee 
+
+            '''
+
+            directions = cubemap_face_directions(face, ph, pw)
+            # directions = rearrange(directions, 'h w c -> (h w) c') 
+            directions = rearrange(directions, 'h w c -> (h w) c') 
+            
+            directions_sign = torch.from_numpy(np.sign(directions)).to(device)
+            directions = (np.abs(directions) * (max_x-1)).round() 
+            rope_cache_x = X[directions[:,0]]
+            rope_cache_y = Y[directions[:,1]]
+            rope_cache_z = Z[directions[:,2]]
+            
+            
+            rope_cache = torch.stack([rope_cache_x, rope_cache_y, rope_cache_z], dim=-1) 
+            
+
+            
+            rope_cache = rope_cache * directions_sign[:, None, :]
+            rope_cache = torch.stack([torch.cos(rope_cache), torch.sin(rope_cache)], dim=0)
+
+
+            
+            rope_cache = torch.concat([rope_cache[:, :, :, 0], rope_cache[:, :, :, 1], rope_cache[:, :, :, 2]], dim=-1)
+            rope_cache = rope_cache.reshape(2, ph, pw, -1)
+            ph_mul_pw = ph * pw
+
+            
+            face_rope_cache.append(rope_cache.reshape(2, ph_mul_pw, -1))
+
+        
+        cat_face_rope_cache = torch.cat(face_rope_cache, 1)
+        pad = torch.zeros(2, pad_to_multiplier - cat_face_rope_cache.shape[1] % pad_to_multiplier, half_dim)
+        
+        cat_face_rope_cache = torch.cat([cat_face_rope_cache[:, :, :pad.shape[-1]], pad], dim=1)
+        face_rope_dict[face] = cat_face_rope_cache[:, None, None, None, :]
+
+    
+    for face in faces:
+        rope2d_freqs_grid_face = dict()
+        for pn in dynamic_resolution_h_w[1.0]:
+            scale_schedule = dynamic_resolution_h_w[1.0][pn]['scales']
+            tmp_scale_schedule = [(1, h, w) for _, h, w in scale_schedule]
+            rope2d_freqs_grid_face[str(tuple(tmp_scale_schedule))] = face_rope_dict[face]
+        rope2d_freqs_grid[face] = rope2d_freqs_grid_face
+
+    
+
+
+    return rope2d_freqs_grid
 
 def precompute_rope2d_freqs_grid_geo(dim, dynamic_resolution_h_w, rope2d_normalized_by_hw, pad_to_multiplier=1, base=10000.0, device=None, scaling_factor=1.0):
     # split the dimension into half, one for x and one for y
     half_dim = dim // 2
     max_x = max_y = max_z = 2048 // 16
+    
     
     inv_freq = 1.0 / (base ** (torch.arange(0, half_dim, 3, dtype=torch.int64).float().to(device) / half_dim)) # namely theta, 1 / (10000^(i/half_dim)), i=0,2,..., half_dim-2
     t_x = torch.arange(max_x, device=device, dtype=torch.int64).type_as(inv_freq)
@@ -86,8 +198,10 @@ def precompute_rope2d_freqs_grid_geo(dim, dynamic_resolution_h_w, rope2d_normali
     t_x = t_x / scaling_factor
     freqs_x = torch.outer(t_x, inv_freq)  # (max_x, dim / (1 for 1d, 2 for 2d, 3 for 3d) / 2), namely x*theta
     t_y = t_y / scaling_factor
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, half_dim, 3, dtype=torch.int64).float().to(device) / half_dim)) # namely theta, 1 / (10000^(i/half_dim)), i=0,2,..., half_dim-2
     freqs_y = torch.outer(t_y, inv_freq)  # (max_y, dim / (1 for 1d, 2 for 2d, 3 for 3d) / 2), namely y*theta
     t_z = t_z / scaling_factor
+    inv_freq = 1.0 / (base ** (torch.arange(0, half_dim, 3, dtype=torch.int64).float().to(device) / half_dim)) # namely theta, 1 / (10000^(i/half_dim)), i=0,2,..., half_dim-2
     freqs_z = torch.outer(t_z, inv_freq)  # (max_z, dim / (1 for 1d, 2 for 2d, 3 for 3d) / 2), namely z*theta
 
     
@@ -128,21 +242,22 @@ def precompute_rope2d_freqs_grid_geo(dim, dynamic_resolution_h_w, rope2d_normali
             directions = cubemap_face_directions(face, ph, pw)
             # directions = rearrange(directions, 'h w c -> (h w) c') 
             directions = rearrange(directions, 'h w c -> (h w) c') 
-            directions_sign = torch.from_numpy(np.sign(directions)).to(freqs_grid_map.dtype)
+            directions_sign = torch.from_numpy(np.sign(directions))
             directions = (np.abs(directions) * (max_x-1)).round()
             
             rope_cache = freqs_grid_map[directions[:,0], directions[:,1], directions[:,2]] 
-            rope_cache = rope_cache * directions_sign[:, None, :]
+            rope_cache = rope_cache * directions_sign[:, None, :] 
             rope_cache = torch.stack([torch.cos(rope_cache), torch.sin(rope_cache)], dim=0)
             rope_cache = torch.concat([rope_cache[:, :, :, 0], rope_cache[:, :, :, 1], rope_cache[:, :, :, 2]], dim=-1)
             rope_cache = rope_cache.reshape(2, ph, pw, -1)
             ph_mul_pw = ph * pw
+            
             face_rope_cache.append(rope_cache.reshape(2, ph_mul_pw, -1))
 
         
         cat_face_rope_cache = torch.cat(face_rope_cache, 1)
         pad = torch.zeros(2, pad_to_multiplier - cat_face_rope_cache.shape[1] % pad_to_multiplier, half_dim)
-        cat_face_rope_cache = torch.cat([cat_face_rope_cache, pad], dim=1)
+        cat_face_rope_cache = torch.cat([cat_face_rope_cache[:, :, :half_dim], pad], dim=1)
         face_rope_dict[face] = cat_face_rope_cache[:, None, None, None, :]
 
     
@@ -161,6 +276,116 @@ def precompute_rope2d_freqs_grid_geo(dim, dynamic_resolution_h_w, rope2d_normali
 
 
 
+def precompute_rope2d_freqs_grid_geo_interleaved(dim, dynamic_resolution_h_w, rope2d_normalized_by_hw, pad_to_multiplier=1, base=10000.0, device=None, scaling_factor=1.0):
+    # split the dimension into half, one for x and one for y
+
+    scale_schedule = dynamic_resolution_h_w[1.0]['1M']['scales']
+    max_t = 0 
+    for (_, ph, pw) in scale_schedule:
+        if max_t < ph * pw:
+            max_t = ph * pw
+
+
+    max_t += max_t % 3 + 1
+
+    max_t = 2048 // 16
+    max_t *= 3
+    # max_t += max_t % 3 + 1
+
+    
+    
+    
+    half_dim = dim // 2
+    
+    inv_freq = 1.0 / (base ** (torch.arange(0, half_dim, 3, dtype=torch.int64).float().to(device) / half_dim)) # namely theta, 1 / (10000^(i/half_dim)), i=0,2,..., half_dim-2
+    t = torch.arange(max_t, device=device, dtype=torch.int64).type_as(inv_freq)
+    t = t / scaling_factor
+    freqs = torch.outer(t, inv_freq)  # (max_x, dim / (1 for 1d, 2 for 2d, 3 for 3d) / 2), namely x*theta
+    all_idx = list(range(0, freqs.shape[0]))
+    X = freqs[all_idx[0::3], :]
+    Y = freqs[all_idx[1::3], :]
+    Z = freqs[all_idx[2::3], :]
+
+    max_x = X.shape[0]
+
+    
+
+
+
+    
+
+
+    '''
+    next we precompute the grid for 6 faces of the cubemap of differrent sacle. 
+
+    As each face must be a sqaure, we only consider h_div_w=1.0 
+
+    '''
+    
+    
+
+    # get x y z  for 6 faces 
+    faces = ['front', 'right', 'left', 'back', 'bottom', 'top'] 
+    face_rope_dict = dict() 
+    rope_cache_list = []
+
+    rope2d_freqs_grid = dict()
+    for face in faces:
+        face_rope_cache = list()
+        for (_, ph, pw) in scale_schedule:
+            assert rope2d_normalized_by_hw == 2 
+            '''
+            for simplicity, we directly use star stylee 
+
+            '''
+
+            directions = cubemap_face_directions(face, ph, pw)
+            # directions = rearrange(directions, 'h w c -> (h w) c') 
+            directions = rearrange(directions, 'h w c -> (h w) c') 
+            
+            directions_sign = torch.from_numpy(np.sign(directions)).to(device)
+            directions = (np.abs(directions) * (max_x-1)).round() 
+            rope_cache_x = X[directions[:,0]]
+            rope_cache_y = Y[directions[:,1]]
+            rope_cache_z = Z[directions[:,2]]
+            
+            
+            rope_cache = torch.stack([rope_cache_x, rope_cache_y, rope_cache_z], dim=-1) 
+            
+
+            
+            rope_cache = rope_cache * directions_sign[:, None, :]
+            rope_cache = torch.stack([torch.cos(rope_cache), torch.sin(rope_cache)], dim=0)
+
+
+            
+            rope_cache = torch.concat([rope_cache[:, :, :, 0], rope_cache[:, :, :, 1], rope_cache[:, :, :, 2]], dim=-1)
+            rope_cache = rope_cache.reshape(2, ph, pw, -1)
+            ph_mul_pw = ph * pw
+
+            
+            face_rope_cache.append(rope_cache.reshape(2, ph_mul_pw, -1))
+
+        
+        cat_face_rope_cache = torch.cat(face_rope_cache, 1)
+        pad = torch.zeros(2, pad_to_multiplier - cat_face_rope_cache.shape[1] % pad_to_multiplier, half_dim)
+        
+        cat_face_rope_cache = torch.cat([cat_face_rope_cache[:, :, :pad.shape[-1]], pad], dim=1)
+        face_rope_dict[face] = cat_face_rope_cache[:, None, None, None, :]
+
+    
+    for face in faces:
+        rope2d_freqs_grid_face = dict()
+        for pn in dynamic_resolution_h_w[1.0]:
+            scale_schedule = dynamic_resolution_h_w[1.0][pn]['scales']
+            tmp_scale_schedule = [(1, h, w) for _, h, w in scale_schedule]
+            rope2d_freqs_grid_face[str(tuple(tmp_scale_schedule))] = face_rope_dict[face]
+        rope2d_freqs_grid[face] = rope2d_freqs_grid_face
+
+    
+
+
+    return rope2d_freqs_grid
 
 
 
@@ -466,7 +691,7 @@ class SelfAttention(nn.Module):
             if self.use_flex_attn and attn_fn is not None:
                 oup = attn_fn(q, k, v, scale=self.scale).transpose(1, 2).reshape(B, L, C)
             else:
-                oup = slow_attn(query=q, key=k, value=v, scale=self.scale, attn_mask=attn_bias_or_two_vector, dropout_p=0).transpose(1, 2).reshape(B, L, C)
+                oup = slow_attn(query=q.to(v.dtype), key=k.to(v.dtype), value=v, scale=self.scale, attn_mask=attn_bias_or_two_vector, dropout_p=0).transpose(1, 2).reshape(B, L, C)
             # oup: bf16
         
         return self.proj_drop(self.proj(oup))

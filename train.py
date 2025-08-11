@@ -437,13 +437,14 @@ def train_one_ep(
     from infinity.utils.lr_control import lr_wd_annealing
     trainer: InfinityTrainer
     
+    
     step_cnt = 0
     header = f'[Ep]: [{ep:4d}/{args.ep}]'
-    
-    with misc.Low_GPU_usage(files=[args.log_txt_path], sleep_secs=20, verbose=True) as telling_dont_kill:
+    with misc.Low_GPU_usage(files=[args.log_txt_path], sleep_secs=1, verbose=True) as telling_dont_kill:
+        
         last_touch = time.time()
         g_it, max_it = ep * iters_train, args.ep * iters_train
-        
+
         doing_profiling = args.prof and ep == 0 and (args.profall or dist.is_master())
         maybe_record_function = record_function if doing_profiling else nullcontext
         trainer.gpt_wo_ddp.maybe_record_function = maybe_record_function
@@ -455,14 +456,16 @@ def train_one_ep(
         ranges = set([2 ** i for i in range(20)])
         if ep <= 1: ranges |= {1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40}
         PRINTABLE_IT_PLUS_1 = set(FREQ*i for i in ranges)
-
+        
         me = misc.MetricLogger()
         [me.add_meter(x, misc.SmoothedValue(window_size=1, fmt='{value:.2g}')) for x in ['tlr']]
         [me.add_meter(x, misc.SmoothedValue(window_size=1, fmt='{median:.2f} ({global_avg:.2f})')) for x in ['tnm']]
         [me.add_meter(x, misc.SmoothedValue(window_size=1, fmt='{median:.3f} ({global_avg:.3f})')) for x in ['Lm', 'Lt']]
         [me.add_meter(x, misc.SmoothedValue(window_size=1, fmt='{median:.2f} ({global_avg:.2f})')) for x in ['Accm', 'Acct']]
         # ============================================= iteration loop begins =============================================
+        
         for it, data in me.log_every(start_it, iters_train, ld_or_itrt, args.log_freq, args.log_every_iter, header):
+            
             g_it = ep * iters_train + it
 
             # calling inc_step to sync the global_step

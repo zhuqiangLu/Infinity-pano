@@ -66,6 +66,7 @@ def build_vae_gpt(args: arg_util.Args, vae_st: dict, skip_gpt: bool, force_flash
         always_training_scales=args.always_training_scales,
         apply_spatial_patchify=args.apply_spatial_patchify,
         enable_cubemap=args.enable_cubemap,
+        num_faces=args.num_faces,
     )
     if args.dp >= 0: gpt_kw['drop_path_rate'] = args.dp
     if args.hd > 0: gpt_kw['num_heads'] = args.hd

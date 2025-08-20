@@ -485,7 +485,7 @@ def train_one_ep(
             
             with maybe_record_function('before_train'):
                 # [get data]
-                inp, captions = data
+                inp, selected_faces, captions = data
                 tokens = text_tokenizer(text=captions, max_length=text_tokenizer.model_max_length, padding='max_length', truncation=True, return_tensors='pt')  # todo: put this into dataset
                 input_ids = tokens.input_ids.cuda(non_blocking=True)
                 mask = tokens.attention_mask.cuda(non_blocking=True)
@@ -529,6 +529,7 @@ def train_one_ep(
                     metric_lg=me, 
                     logging_params=stepping and step_cnt == 1 and (ep < 4 or ep in logging_params_milestone), 
                     inp_B3HW=inp, 
+                    selected_faces=selected_faces,
                     text_cond_tuple=text_cond_tuple,
                     args=args,
                 )

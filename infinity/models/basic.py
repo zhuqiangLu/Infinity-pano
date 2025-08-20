@@ -36,9 +36,21 @@ except ImportError:
         return (x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True).add_(epsilon))) * weight
 
 
+# NUM_FACES = os.environ.get('NUM_FACES', 6)
 
+def map_faces(selected_faces):
+    # ['F', 'R', 'L', 'B', 'D', 'U']
+    # ['front', 'right', 'left', 'back', 'bottom', 'top']  
 
-
+    mapping = {
+        "F": "front",   
+        "R": "right",
+        "L": "left",
+        "B": "back",
+        "D": "bottom",
+        "U": "top",
+    }
+    return mapping[selected_faces]
 
 def cubemap_face_directions(face, width, height):
     # Normalized UV coordinates, centered in the middle of each pixel
@@ -604,7 +616,7 @@ class SelfAttention(nn.Module):
         self.cached_v = None
     
     # NOTE: attn_bias_or_two_vector is None during inference
-    def forward(self, x, attn_bias_or_two_vector: Union[torch.Tensor, Tuple[torch.IntTensor, torch.IntTensor]], attn_fn=None, scale_schedule=None, rope2d_freqs_grid=None, need_to_pad=None, scale_ind=0):
+    def forward(self, x, attn_bias_or_two_vector: Union[torch.Tensor, Tuple[torch.IntTensor, torch.IntTensor]], attn_fn=None, scale_schedule=None, rope2d_freqs_grid=None, need_to_pad=None, scale_ind=0, num_faces=6, selected_faces=None):
         """
         :param (fp32) x: shaped (B or batch_size, L or seq_length, C or hidden_dim); if seq-parallel is used, the `L` dim would be shared
         :param (fp32) attn_bias_or_two_vector:
@@ -653,17 +665,24 @@ class SelfAttention(nn.Module):
             v = v.contiguous()      # bf16
         if rope2d_freqs_grid is not None:
             if is_cubemap:
-                assert need_to_pad is not None
+                assert need_to_pad is not None and selected_faces is not None
                 # print(q.shape, k.shape, need_to_pad)
-                face_seq_len = (q.shape[2] - need_to_pad) // 6 
+                face_seq_len = (q.shape[2] - need_to_pad) // num_faces
+                # print(f'face_seq_len: {face_seq_len}, num_faces: {num_faces}, q.shape: {q.shape}, need_to_pad: {need_to_pad}, selected_faces: {selected_faces}, rope2d_freqs_grid: {rope2d_freqs_grid.keys()}')
                 tmp_q = list() 
                 tmp_k = list()
                 start_idx = 0
-                for face_name, face_rope_cache in rope2d_freqs_grid.items():
-                    face_q, face_k = apply_rotary_emb(q[:, :, start_idx:start_idx+face_seq_len], k[:, :, start_idx:start_idx+face_seq_len], scale_schedule, face_rope_cache, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind) #, freqs_cis=freqs_cis)
+                for face_name in selected_faces:
+                    face_name = map_faces(face_name)
+                    face_q, face_k = apply_rotary_emb(q[:, :, start_idx:start_idx+face_seq_len], k[:, :, start_idx:start_idx+face_seq_len], scale_schedule, rope2d_freqs_grid[face_name], self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind) #, freqs_cis=freqs_cis)
                     tmp_q.append(face_q)
                     tmp_k.append(face_k)
                     start_idx += face_seq_len
+                # for face_name, face_rope_cache in rope2d_freqs_grid.items():
+                #     face_q, face_k = apply_rotary_emb(q[:, :, start_idx:start_idx+face_seq_len], k[:, :, start_idx:start_idx+face_seq_len], scale_schedule, face_rope_cache, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind) #, freqs_cis=freqs_cis)
+                #     tmp_q.append(face_q)
+                #     tmp_k.append(face_k)
+                #     start_idx += face_seq_len
                 face_q = torch.cat(tmp_q, dim=2)
                 face_k = torch.cat(tmp_k, dim=2)
                 if need_to_pad > 0: 
@@ -877,7 +896,7 @@ class CrossAttnBlock(nn.Module):
         self.checkpointing_sa_only = checkpointing_sa_only
     
     # NOTE: attn_bias_or_two_vector is None during inference
-    def forward(self, x, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn=None, scale_schedule=None, rope2d_freqs_grid=None, need_to_pad=None, scale_ind=0):    # todo: minGPT and vqgan also uses pre-norm, just like this, while MaskGiT uses post-norm
+    def forward(self, x, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn=None, scale_schedule=None, rope2d_freqs_grid=None, need_to_pad=None, scale_ind=0, num_faces=6, selected_faces=None):    # todo: minGPT and vqgan also uses pre-norm, just like this, while MaskGiT uses post-norm
         with torch.cuda.amp.autocast(enabled=False):    # disable half precision
             if self.shared_aln: # always True;                   (1, 1, 6, C)  + (B, 1, 6, C)
                 gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2) # 116C + B16C =unbind(2)=> 6 B1C
@@ -887,18 +906,18 @@ class CrossAttnBlock(nn.Module):
         if self.fused_norm_func is None:
             x_sa = self.ln_wo_grad(x.float()).mul(scale1.add(1)).add_(shift1)
             if self.checkpointing_sa_only and self.training:
-                x_sa = checkpoint(self.sa, x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad, use_reentrant=False)
+                x_sa = checkpoint(self.sa, x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad, scale_ind, num_faces, selected_faces, use_reentrant=False)
             else:
-                x_sa = self.sa(x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad=need_to_pad)
+                x_sa = self.sa(x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad=need_to_pad, scale_ind=scale_ind, num_faces=num_faces, selected_faces=selected_faces)
             x = x + self.drop_path(x_sa.mul_(gamma1))
             x = x + self.ca(self.ca_norm(x), ca_kv).float().mul_(self.ca_gamma)
             x = x + self.drop_path(self.ffn( self.ln_wo_grad(x.float()).mul(scale2.add(1)).add_(shift2) ).mul(gamma2)) # this mul(gamma2) cannot be in-placed cuz we possibly use FusedMLP
         else:
             x_sa = self.fused_norm_func(C=self.C, eps=self.norm_eps, x=x, scale=scale1, shift=shift1)
             if self.checkpointing_sa_only and self.training:
-                x_sa = checkpoint(self.sa, x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad, use_reentrant=False)
+                x_sa = checkpoint(self.sa, x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad, scale_ind, num_faces, selected_faces, use_reentrant=False)
             else:
-                x_sa = self.sa(x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad=need_to_pad, scale_ind=scale_ind)
+                x_sa = self.sa(x_sa, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad=need_to_pad, scale_ind=scale_ind, num_faces=num_faces, selected_faces=selected_faces)
             x = x + self.drop_path(x_sa.mul_(gamma1))
             x = x + self.ca(self.ca_norm(x), ca_kv).float().mul_(self.ca_gamma)
             x = x + self.drop_path(self.ffn(self.fused_norm_func(C=self.C, eps=self.norm_eps, x=x, scale=scale2, shift=shift2)).mul(gamma2)) # this mul(gamma2) cannot be in-placed cuz we possibly use FusedMLP

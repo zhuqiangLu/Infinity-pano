@@ -160,6 +160,8 @@ class Args(Tap):
     pano_aug: bool = False              # apply pano augmentation
     enable_cubemap: bool = False        # apply cubemap augmentation
     cubemap_size: int = 512             # cubemap size
+    shuffle_faces: bool = False         # shuffle faces
+    num_faces: int = 6                  # number of faces
 
 
     ############################  Attention! The following arguments and configurations are set automatically, you can skip reading the following part ###############################

@@ -146,6 +146,8 @@ def build_t2i_dataset(
             pano_aug=args.pano_aug if args.pano_aug is not None else False,
             enable_cubemap=args.enable_cubemap if args.enable_cubemap is not None else False,
             cubemap_size=args.cubemap_size if args.cubemap_size is not None else 512,
+            shuffle_faces=args.shuffle_faces if args.shuffle_faces is not None else False,
+            num_faces=args.num_faces if args.num_faces is not None else 6,
         )
     else:
         raise ValueError(f'args.use_streaming_dataset={args.use_streaming_dataset} unsupported')

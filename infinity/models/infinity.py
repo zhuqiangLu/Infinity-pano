@@ -77,13 +77,15 @@ class MultipleLayers(nn.Module):
         for i in range(index, index+num_blocks_in_a_chunk):
             self.module.append(ls[i])
 
-    def forward(self, x, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn=None, scale_schedule=None, checkpointing_full_block=False, rope2d_freqs_grid=None, need_to_pad=0):
+    def forward(self, x, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn=None, scale_schedule=None, checkpointing_full_block=False, rope2d_freqs_grid=None, need_to_pad=0, num_faces=6, selected_faces=None):
         h = x
         for m in self.module:
+           
+
             if checkpointing_full_block:
-                h = torch.utils.checkpoint.checkpoint(m, h, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad, use_reentrant=False)
+                h = torch.utils.checkpoint.checkpoint(m, h, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad, 0, num_faces, selected_faces, use_reentrant=False)
             else:
-                h = m(h, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad)
+                h = m(h, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn, scale_schedule, rope2d_freqs_grid, need_to_pad, 0, num_faces, selected_faces)
         return h
 
 class Infinity(nn.Module):
@@ -118,6 +120,7 @@ class Infinity(nn.Module):
         apply_spatial_patchify = 0,
         inference_mode=False,
         enable_cubemap=False,
+        num_faces=6,
     ):
         # set hyperparameters
         self.C = embed_dim
@@ -144,7 +147,7 @@ class Infinity(nn.Module):
         self.video_frames = video_frames
         self.always_training_scales = always_training_scales
         self.enable_cubemap = enable_cubemap
-
+        self.num_faces = num_faces
         assert add_lvl_embeding_only_first_block in [0,1]
         self.add_lvl_embeding_only_first_block = add_lvl_embeding_only_first_block
         assert rope2d_each_sa_layer in [0,1]
@@ -333,7 +336,7 @@ class Infinity(nn.Module):
                 scale_schedule = [ (min(t, self.video_frames//4+1), h, w) for (t,h, w) in scale_schedule]
                 patchs_nums_tuple = tuple(scale_schedule)
                 if self.enable_cubemap:
-                    SEQ_L = sum( pt * ph * pw for pt, ph, pw in patchs_nums_tuple) * 6
+                    SEQ_L = sum( pt * ph * pw for pt, ph, pw in patchs_nums_tuple) * self.num_faces
                 else:
                     SEQ_L = sum( pt * ph * pw for pt, ph, pw in patchs_nums_tuple)
                 aligned_L = SEQ_L+ (self.pad_to_multiplier - SEQ_L % self.pad_to_multiplier) if SEQ_L % self.pad_to_multiplier != 0 else SEQ_L
@@ -383,7 +386,7 @@ class Infinity(nn.Module):
             x_BLC_head = x_BLC[:, :-need_to_pad]
             x_BLC_tail = x_BLC[:, -need_to_pad:]
 
-            x_BLC = rearrange(x_BLC_head, 'b (n l) c -> (n b) l c', n=6)
+            x_BLC = rearrange(x_BLC_head, 'b (n l) c -> (n b) l c', n=self.num_faces)
            
             
 
@@ -398,14 +401,14 @@ class Infinity(nn.Module):
         x_BLC_list.append(x_BLC[:,ptr:])
         x_BLC = torch.cat(x_BLC_list, dim=1)
         if self.enable_cubemap:
-            x_BLC = rearrange(x_BLC, '(n b) l c -> b (n l) c', n=6)
+            x_BLC = rearrange(x_BLC, '(n b) l c -> b (n l) c', n=self.num_faces)
             x_BLC = torch.cat((x_BLC, x_BLC_tail), dim=1)
             
             
         return x_BLC
 
     def forward(self, label_B_or_BLT: Union[torch.LongTensor, Tuple[torch.FloatTensor, torch.IntTensor, int]], x_BLC_wo_prefix: torch.Tensor, scale_schedule: List[Tuple[int]],
-        cfg_infer=False,
+        cfg_infer=False, selected_faces=None,
         **kwargs,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:  # returns logits_BLV
         """
@@ -417,10 +420,13 @@ class Infinity(nn.Module):
         
         x_BLC_wo_prefix = x_BLC_wo_prefix.float()       # input should be float32
         B = x_BLC_wo_prefix.shape[0]
-        N = 6 # the number of faces
+        # N = 6 # the number of faces
+        N = self.num_faces
+
         if self.enable_cubemap:
             B = B // N 
 
+       
 
         # [1. get input sequence x_BLC]
         with torch.amp.autocast('cuda', enabled=False):
@@ -446,7 +452,10 @@ class Infinity(nn.Module):
             sos_len = sos.shape[1]
             if self.enable_cubemap:
                 sos = sos.unsqueeze(0).repeat(N, 1, 1, 1)
+
                 x_BLC_body = rearrange(x_BLC_body, '(b n) l c -> n b l c', b=B, n=N)
+            
+
 
                 x_BLC = torch.cat((sos, x_BLC_body), dim=2)
 
@@ -527,14 +536,15 @@ class Infinity(nn.Module):
                     x_BLC = self.add_lvl_embeding_for_x_BLC(x_BLC, scale_schedule, need_to_pad)
                 if not self.add_lvl_embeding_only_first_block:
                     x_BLC = self.add_lvl_embeding_for_x_BLC(x_BLC, scale_schedule, need_to_pad)
-                x_BLC = chunk(x=x_BLC, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=attn_bias_or_two_vector, attn_fn=attn_fn, scale_schedule=scale_schedule, checkpointing_full_block=checkpointing_full_block, rope2d_freqs_grid=self.rope2d_freqs_grid, need_to_pad=need_to_pad)
+                # print(f'x_BLC.shape: {x_BLC.shape}, ca_kv[0].shape: {ca_kv[0].shape}, num_faces: {self.num_faces}')
+                x_BLC = chunk(x=x_BLC, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=attn_bias_or_two_vector, attn_fn=attn_fn, scale_schedule=scale_schedule, checkpointing_full_block=checkpointing_full_block, rope2d_freqs_grid=self.rope2d_freqs_grid, need_to_pad=need_to_pad, num_faces=self.num_faces, selected_faces=selected_faces)
 
         # [3. unpad the seqlen dim, and then get logits]
-        l_end = l_end if not self.enable_cubemap else l_end * 6
+        l_end = l_end if not self.enable_cubemap else l_end * self.num_faces
         # raise
         pred_logit = self.get_logits(x_BLC[:, :l_end], cond_BD)    # return logits BLV, V is vocab_size
         if self.enable_cubemap:
-            pred_logit = rearrange(pred_logit, 'b (n l) v -> (b n) l v', n=6)
+            pred_logit = rearrange(pred_logit, 'b (n l) v -> (b n) l v', n=self.num_faces)
             
         return pred_logit
 
@@ -637,7 +647,7 @@ class Infinity(nn.Module):
 
             # cubemap trick goes here, expand to 6 faces 
             if enable_cubemap and si == 0: 
-                last_stage = last_stage.unsqueeze(1).expand(-1, 6, -1, -1)
+                last_stage = last_stage.unsqueeze(1).expand(-1, self.num_faces, -1, -1)
                 last_stage = rearrange(last_stage, 'b n l c -> (b n) l c')
 
             need_to_pad = 0
@@ -666,7 +676,7 @@ class Infinity(nn.Module):
 
                 
                 if enable_cubemap and block_idx == 0: 
-                    last_stage = rearrange(last_stage, '(b n) l c -> b (n l) c', n=6)
+                    last_stage = rearrange(last_stage, '(b n) l c -> b (n l) c', n=self.num_faces)
                 for m in b.module:
                     last_stage = m(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=None, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=self.rope2d_freqs_grid, scale_ind=si, need_to_pad=need_to_pad)
                     
@@ -685,7 +695,7 @@ class Infinity(nn.Module):
                 logits_BlV = self.get_logits(last_stage[:B], cond_BD[:B]).mul(1/tau_list[si])
             
             if enable_cubemap:
-                logits_BlV = rearrange(logits_BlV, 'b (n l) c -> (b n) l c', n=6)
+                logits_BlV = rearrange(logits_BlV, 'b (n l) c -> (b n) l c', n=self.num_faces)
             # print("logits_BlV shape", logits_BlV.shape)
             
             if self.use_bit_label:
@@ -707,7 +717,7 @@ class Infinity(nn.Module):
                     assert pn[0] == 1
                     
                     if enable_cubemap:
-                        idx_Bld = idx_Bld.reshape(B*6, pn[1], pn[2], -1) # shape: [B, h, w, d] or [B, h, w, 4d]
+                        idx_Bld = idx_Bld.reshape(B*self.num_faces, pn[1], pn[2], -1) # shape: [B, h, w, d] or [B, h, w, 4d]
                     else:
                         idx_Bld = idx_Bld.reshape(B, pn[1], pn[2], -1) # shape: [B, h, w, d] or [B, h, w, 4d]
                     if self.apply_spatial_patchify: # unpatchify operation

@@ -151,7 +151,7 @@ class InfinityTrainer(object):
     
     def train_step(
         self, ep: int, it: int, g_it: int, stepping: bool, clip_decay_ratio: float, metric_lg: misc.MetricLogger, logging_params: bool,
-        inp_B3HW: FTen, text_cond_tuple: Union[ITen, FTen], args: arg_util.Args,
+        inp_B3HW: FTen, selected_faces, text_cond_tuple: Union[ITen, FTen], args: arg_util.Args,
     ) -> Tuple[torch.Tensor, Optional[float]]:
         
         B = inp_B3HW.shape[0]  # if isinstance(inp_B3HW, torch.Tensor) else inp_B3HW[0].shape[0]
@@ -164,6 +164,8 @@ class InfinityTrainer(object):
         h_div_w_template = h_div_w_templates[np.argmin(np.abs(h_div_w-h_div_w_templates))]
         scale_schedule = dynamic_resolution_h_w[h_div_w_template][args.pn]['scales']
         scale_schedule = [(min(t, T//4+1), h, w) for (t,h, w) in scale_schedule]
+
+       
         
         # [forward]
         with self.gpt_opt.amp_ctx:
@@ -184,7 +186,7 @@ class InfinityTrainer(object):
             x_BLC_wo_prefix = x_BLC_wo_prefix[:, :(training_seq_len-np.array(scale_schedule[0]).prod()), :]
 
             self.gpt_wo_ddp.forward  
-            logits_BLV = self.gpt(text_cond_tuple, x_BLC_wo_prefix, scale_schedule=scale_schedule[:training_scales]) # [bs, 1*1+...+64*64, vocab_size or log2(vocab_size)*2]
+            logits_BLV = self.gpt(text_cond_tuple, x_BLC_wo_prefix, scale_schedule=scale_schedule[:training_scales], selected_faces=selected_faces) # [bs, 1*1+...+64*64, vocab_size or log2(vocab_size)*2]
             self.batch_size, self.seq_len = logits_BLV.shape[:2]
 
             self.seq_len_each = [idx_Bl.shape[1] for idx_Bl in gt_ms_idx_Bl]

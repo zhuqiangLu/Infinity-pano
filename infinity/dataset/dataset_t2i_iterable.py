@@ -104,6 +104,8 @@ class T2IIterableDataset(IterableDataset):
         pano_aug: bool = False,
         cubemap_size: int = 512,
         enable_cubemap: bool = False,
+        shuffle_faces: bool = False,
+        num_faces: int = 6,
         **kwargs,
     ):
         self.meta_folder = meta_folder
@@ -135,6 +137,8 @@ class T2IIterableDataset(IterableDataset):
         self.pano_aug = pano_aug
         self.cubemap_size = cubemap_size
         self.enable_cubemap = enable_cubemap
+        self.shuffle_faces = shuffle_faces
+        self.num_faces = num_faces
         print(f'num_replicas: {num_replicas}, rank: {rank}, dataloader_workers: {dataloader_workers}, seed:{seed}, samples_div_gpus_workers_batchsize_2batches: {self.samples_div_gpus_workers_batchsize_2batches}')
 
     def set_h_div_w_template2generator(self,):
@@ -299,16 +303,28 @@ class T2IIterableDataset(IterableDataset):
                     cubemaps.append(cubemap)
                 images = torch.stack(cubemaps, dim=0)    
 
+                selected_faces = ['F', 'R', 'L', 'B', 'D', 'U']
+
+
+                if self.shuffle_faces:
+                    shuffle_idx = torch.randperm(images.shape[1])
+                    images = images[:, shuffle_idx]
+                    selected_faces = [selected_faces[i] for i in shuffle_idx]
+                
+                if self.num_faces != 6:
+                    assert self.shuffle_faces == True
+                    images = images[:, :self.num_faces]
+                    selected_faces = selected_faces[:self.num_faces]
 
                 images = rearrange(images, 'b n c h w -> (b n) c h w')
+                # captions = [captions[i] for i in shuffle_idx]
 
             
                 
                     
                 
-                
-            
-            yield (images, captions)
+             
+            yield (images, selected_faces, captions)
             del batch_data
             del images
             del captions
@@ -405,6 +421,7 @@ class T2IIterableDataset(IterableDataset):
         pass
 
 if __name__ == '__main__':
+
     # torchrun --nnodes=1 --nproc-per-node=2 --master_addr=$METIS_WORKER_0_HOST --master_port=$METIS_WORKER_0_PORT dataset/dataset_t2i_iterable.py
     tdist.init_process_group(backend='nccl')
     batch_size = 4
@@ -424,26 +441,47 @@ if __name__ == '__main__':
         num_replicas=tdist.get_world_size(),
         rank=tdist.get_rank(), # 0
         dataloader_workers=dataloader_workers,
+        cubemap_size = 512,
+        enable_cubemap = False,
+        pano_aug = True,
+
     )
-    dataloader = DataLoader(dataset, batch_size=None, num_workers=dataloader_workers)
-    print(f'len(dataloader): {len(dataloader)}, len(dataset): {len(dataset)}, total_samples: {dataset.total_samples()}')
-    t1 = time.time()
-    h_div_w2samples = {}
-    for ep in range(4):
-        dataloader.dataset.set_epoch(ep)
-        pbar = tqdm.tqdm(total=len(dataloader))
-        for i, data in enumerate(iter(dataloader)):
-            pbar.update(1)
-            t2 = time.time()
-            h_div_w = data[0].shape[-2] / data[0].shape[-1]
-            h_div_w = f'{h_div_w:.3f}'
-            if h_div_w not in h_div_w2samples:
-                h_div_w2samples[h_div_w] = 0
-            h_div_w2samples[h_div_w] += 1
-            if (i+1) % 100 == 0:
-                total_samples = np.sum(list(h_div_w2samples.values()))
-                print()
-                for h_div_w, num in sorted(h_div_w2samples.items()):
-                    print(f'h_div_w: {h_div_w}, samples: {num}, proportion: {num/total_samples*100:.1f}%')
-                print()
-            t1 = time.time()
+    for batch in dataset:
+        (image, caption) = batch 
+        # cubemaps = rearrange(image, '(b n) c h w -> b n c h w', n=6, b=4)
+        print(image.shape, caption)
+        raise
+        for cubemap in cubemaps:
+            for idx, image in enumerate(cubemap):
+                # Convert tensor to PIL Image and save
+                img_tensor = image.cpu()  # Get first image from batch
+                # Rescale from [-1,1] to [0,1] range
+                img_tensor = (img_tensor + 1) / 2
+                # Clamp values to valid range
+                img_tensor = torch.clamp(img_tensor, 0, 1)
+                # Convert to PIL
+                img_pil = torchvision.transforms.ToPILImage()(img_tensor)
+                img_pil.save(f'debug/sample_image_{idx}.png')
+            raise
+    # dataloader = DataLoader(dataset, batch_size=None, num_workers=dataloader_workers)
+    # print(f'len(dataloader): {len(dataloader)}, len(dataset): {len(dataset)}, total_samples: {dataset.total_samples()}')
+    # t1 = time.time()
+    # h_div_w2samples = {}
+    # for ep in range(4):
+    #     dataloader.dataset.set_epoch(ep)
+    #     pbar = tqdm.tqdm(total=len(dataloader))
+    #     for i, data in enumerate(iter(dataloader)):
+    #         pbar.update(1)
+    #         t2 = time.time()
+    #         h_div_w = data[0].shape[-2] / data[0].shape[-1]
+    #         h_div_w = f'{h_div_w:.3f}'
+    #         if h_div_w not in h_div_w2samples:
+    #             h_div_w2samples[h_div_w] = 0
+    #         h_div_w2samples[h_div_w] += 1
+    #         if (i+1) % 100 == 0:
+    #             total_samples = np.sum(list(h_div_w2samples.values()))
+    #             print()
+    #             for h_div_w, num in sorted(h_div_w2samples.items()):
+    #                 print(f'h_div_w: {h_div_w}, samples: {num}, proportion: {num/total_samples*100:.1f}%')
+    #             print()
+    #         t1 = time.time()
